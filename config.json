@@ -1,0 +1,20 @@
+{
+  "data_folder": "/content/drive/MyDrive/CICIDS2018Training/cicids2018",
+  "model_name": "cicids2018_dense_model",
+  "labeling": {
+    "normalize_label_rules": [
+      "benign->BENIGN",
+      "bot->BOTNET",
+      "ddos->DDOS",
+      "dos->DOS",
+      "else->OTHER"
+    ],
+    "collapse_mode": "option_b_4_class",
+    "collapsed_classes": [
+      "BENIGN",
+      "DOS_DDOS",
+      "BOTNET",
+      "OTHER_ATTACK"
+    ]
+  }
+}

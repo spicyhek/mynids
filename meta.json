@@ -1,0 +1,15 @@
+{
+  "model_name": "cicids2018_dense_model",
+  "model_type": "dense_mlp",
+  "num_features": 80,
+  "num_classes": 4,
+  "classes": [
+    "BENIGN",
+    "BOTNET",
+    "DOS_DDOS",
+    "OTHER_ATTACK"
+  ],
+  "collapse_mode": "option_b_4_class",
+  "tensorflow_version": "2.19.0",
+  "artifacts_written_stage": "post_train"
+}

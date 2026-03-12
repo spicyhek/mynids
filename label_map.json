@@ -1,0 +1,6 @@
+{
+  "0": "BENIGN",
+  "1": "BOTNET",
+  "2": "DOS_DDOS",
+  "3": "OTHER_ATTACK"
+}

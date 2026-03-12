@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>nids.brendanmanley.com</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="page" aria-label="NIDS dashboard">
+      <section class="layout-shell">
+        <header class="topbar">
+          <a class="brand" href="/" aria-label="NIDS homepage">nids.brendanmanley.com</a>
+          <nav class="topnav" aria-label="NIDS navigation">
+            <a href="#overview" aria-current="page">overview</a>
+            <a href="#activity">activity</a>
+            <a href="#sources">sources</a>
+            <a href="#warnings">warnings</a>
+          </nav>
+        </header>
+
+        <section class="hero" id="overview">
+          <article class="panel intro-panel" aria-labelledby="intro-title">
+            <h1 id="intro-title">Intrusion Monitor</h1>
+            <p>
+              This page shows a summarized view of what network activitymy homelab cluster has
+              classified recently. Raw packets, payloads, private addresses, and
+              per-flow records stay private, though.
+            </p>
+            <p class="subtitle">
+              Same retro shell, safer dataset.
+            </p>
+            <div class="hero-meta">
+              <div class="hero-metric">
+                <span class="meta-label">Model</span>
+                <strong id="model-name">Loading...</strong>
+              </div>
+              <div class="hero-metric">
+                <span class="meta-label">Last classified</span>
+                <strong id="last-classified">Waiting for data</strong>
+              </div>
+              <div class="hero-metric">
+                <span class="meta-label">Ingestion</span>
+                <strong id="ingest-state">Unknown</strong>
+              </div>
+            </div>
+          </article>
+
+          <aside class="panel summary-panel" aria-labelledby="summary-title">
+            <h2 id="summary-title">Signal Summary</h2>
+            <div class="summary-kpis">
+              <div class="summary-kpi">
+                <span class="meta-label">Total classified</span>
+                <strong class="summary-value" id="total-events">0</strong>
+              </div>
+              <div class="summary-kpi">
+                <span class="meta-label">Recent window</span>
+                <strong class="summary-window" id="recent-window-label">Last 60 minutes</strong>
+              </div>
+            </div>
+            <p class="summary-copy">
+              Counts below are read-only aggregates generated from private internal
+              traffic inspection and model inference.
+            </p>
+          </aside>
+        </section>
+
+        <section class="panel stats-panel" aria-labelledby="stats-title">
+          <div class="section-heading">
+            <h2 id="stats-title">Recent Classifications</h2>
+            <span class="meta-label">aggregate only</span>
+          </div>
+          <div class="cards-grid">
+            <article class="stat-card">
+              <span class="meta-label">Recent benign</span>
+              <strong class="stat-value is-benign" id="recent-benign">0</strong>
+            </article>
+            <article class="stat-card">
+              <span class="meta-label">Recent botnet</span>
+              <strong class="stat-value is-botnet" id="recent-botnet">0</strong>
+            </article>
+            <article class="stat-card">
+              <span class="meta-label">Recent dos / ddos</span>
+              <strong class="stat-value is-dos" id="recent-dos">0</strong>
+            </article>
+            <article class="stat-card">
+              <span class="meta-label">Recent other attack</span>
+              <strong class="stat-value is-other" id="recent-other">0</strong>
+            </article>
+          </div>
+        </section>
+
+        <section class="content-grid">
+          <article class="panel projects-panel" id="activity">
+            <div class="section-heading">
+              <h2>All-Time Labels</h2>
+              <span class="meta-label">retained history</span>
+            </div>
+            <div class="label-list" id="label-list"></div>
+          </article>
+
+          <article class="panel status-panel">
+            <div class="section-heading">
+              <h2>Hourly Activity</h2>
+              <span class="meta-label">last 24 hours</span>
+            </div>
+            <div class="chart" id="hourly-chart" aria-label="Hourly classified activity"></div>
+          </article>
+
+          <article class="panel projects-panel" id="sources">
+            <div class="section-heading">
+              <h2>Active Sources</h2>
+              <span class="meta-label">sensor names only</span>
+            </div>
+            <div class="source-list" id="source-list"></div>
+          </article>
+
+          <article class="panel projects-panel" id="warnings">
+            <div class="section-heading">
+              <h2>Warnings</h2>
+              <span class="meta-label">live summary notices</span>
+            </div>
+            <div class="warning-list" id="warning-list"></div>
+          </article>
+        </section>
+
+        <div class="pixel-party" aria-hidden="true">
+          <span class="pixel-character char-one"></span>
+          <span class="pixel-character char-two"></span>
+          <span class="pixel-character char-three"></span>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
