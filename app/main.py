@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
+from app.debug_log import agent_log
 from app.inference import FlowClassifier
 from app.schemas import FlowBatchRequest, HealthResponse, IngestResponse, SummaryResponse
 from app.storage import StatsStore
@@ -26,14 +27,55 @@ classifier = FlowClassifier(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # region agent log
+    agent_log(
+        "app/main.py:29",
+        "lifespan_start",
+        {
+            "cwd": str(Path.cwd()),
+            "db_path": str(settings.db_path),
+            "db_parent_exists": settings.db_path.parent.exists(),
+            "model_path": str(settings.model_path),
+            "model_exists": settings.model_path.exists(),
+            "scaler_exists": settings.scaler_path.exists(),
+            "feature_order_exists": settings.feature_order_path.exists(),
+            "label_map_exists": settings.label_map_path.exists(),
+            "label_encoder_exists": settings.label_encoder_path.exists(),
+        },
+        hypothesis_id="H1",
+    )
+    # endregion
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     artifacts = None
     try:
+        # region agent log
+        agent_log("app/main.py:47", "before_classifier_load", {}, hypothesis_id="H3")
+        # endregion
         artifacts = classifier.load()
+        # region agent log
+        agent_log(
+            "app/main.py:50",
+            "after_classifier_load",
+            {"labels_count": len(artifacts.labels), "feature_count": len(artifacts.feature_order)},
+            hypothesis_id="H3",
+        )
+        # endregion
         store = StatsStore(settings.db_path, labels=artifacts.labels)
         store.initialize()
         store.purge_old_events(settings.retention_hours)
-    except Exception:
+    except Exception as exc:
+        # region agent log
+        agent_log(
+            "app/main.py:61",
+            "classifier_or_store_exception",
+            {
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "load_error": classifier.load_error,
+            },
+            hypothesis_id="H4",
+        )
+        # endregion
         labels = classifier.labels or ["BENIGN", "BOTNET", "DOS_DDOS", "OTHER_ATTACK"]
         store = StatsStore(settings.db_path, labels=labels)
         store.initialize()
@@ -42,6 +84,18 @@ async def lifespan(_: FastAPI):
     app.state.model_name = settings.model_name
     app.state.model_loaded = artifacts is not None
     app.state.model_warning = classifier.load_error
+    # region agent log
+    agent_log(
+        "app/main.py:78",
+        "lifespan_ready",
+        {
+            "model_loaded": app.state.model_loaded,
+            "model_warning": app.state.model_warning,
+            "db_exists": settings.db_path.exists(),
+        },
+        hypothesis_id="H2",
+    )
+    # endregion
     yield
 
 

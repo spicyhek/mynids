@@ -259,6 +259,9 @@ body::after {
   color: var(--text-main);
   font-size: 0.6rem;
   line-height: 1.7;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .summary-panel {
@@ -327,7 +330,18 @@ body::after {
   gap: 0.5rem;
 }
 
-.label-row-heading,
+.label-row {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.label-row-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.75rem;
+}
+
 .source-row,
 .chart-row-heading {
   display: flex;
@@ -343,15 +357,26 @@ body::after {
   color: var(--text-main);
 }
 
+.label-row-heading strong {
+  justify-self: end;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .pill {
   display: inline-flex;
   align-items: center;
+  width: fit-content;
+  max-width: 100%;
   padding: 0.35rem 0.55rem;
   font-size: 0.44rem;
+  line-height: 1.5;
   text-transform: uppercase;
   border: 2px solid rgba(66, 208, 242, 0.4);
   background: rgba(18, 30, 56, 0.85);
   text-shadow: 0 0 6px rgba(66, 208, 242, 0.3);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .pill.is-benign,

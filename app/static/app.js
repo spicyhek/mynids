@@ -125,7 +125,6 @@ async function refresh() {
     const data = await loadSummary();
     setText("model-name", data.model_name);
     setText("last-classified", formatDate(data.last_classified_at));
-    setText("ingest-state", data.ingest_enabled ? "private token enabled" : "disabled");
     setText("total-events", formatNumber(data.total_events));
     setText("recent-window-label", `Last ${data.recent_window_minutes} minutes`);
 
@@ -140,7 +139,6 @@ async function refresh() {
   } catch (error) {
     setText("model-name", "Unavailable");
     setText("last-classified", "Unable to load summary");
-    setText("ingest-state", "unknown");
     setText("total-events", "0");
     renderWarnings(["Unable to load the NIDS dashboard summary right now."]);
     renderSources([]);

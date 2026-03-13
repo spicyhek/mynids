@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from app.debug_log import agent_log
 from app.storage import PredictionRow, utcnow
 
 
@@ -55,6 +56,21 @@ class FlowClassifier:
         if self.loaded:
             return ModelArtifacts(labels=self.labels, feature_order=list(self._feature_order))
 
+        # region agent log
+        agent_log(
+            "app/inference.py:60",
+            "load_start",
+            {
+                "model_path": str(self._model_path),
+                "model_exists": self._model_path.exists(),
+                "scaler_exists": self._scaler_path.exists(),
+                "feature_order_exists": self._feature_order_path.exists(),
+                "label_map_exists": self._label_map_path.exists(),
+                "label_encoder_exists": self._label_encoder_path.exists(),
+            },
+            hypothesis_id="H1",
+        )
+        # endregion
         try:
             import joblib
             import numpy as np
@@ -65,7 +81,19 @@ class FlowClassifier:
                 "Use the container or a Python version supported by TensorFlow. "
                 f"Original error: {exc}"
             )
+            # region agent log
+            agent_log(
+                "app/inference.py:81",
+                "runtime_import_failed",
+                {"error_type": type(exc).__name__, "error": str(exc)},
+                hypothesis_id="H3",
+            )
+            # endregion
             raise RuntimeError(self._load_error) from exc
+
+        # region agent log
+        agent_log("app/inference.py:88", "runtime_import_ok", {}, hypothesis_id="H3")
+        # endregion
 
         with self._feature_order_path.open("r", encoding="utf-8") as fh:
             feature_order = json.load(fh)
@@ -78,10 +106,26 @@ class FlowClassifier:
         # Loading the label encoder validates that the artifact exists even though
         # the label map is used as the canonical public class order.
         joblib.load(self._label_encoder_path)
+        # region agent log
+        agent_log(
+            "app/inference.py:101",
+            "artifacts_loaded_before_model",
+            {"feature_count": len(feature_order), "label_count": len(label_map)},
+            hypothesis_id="H1",
+        )
+        # endregion
         self._model = tf.keras.models.load_model(self._model_path)
         self._feature_order = [str(name) for name in feature_order]
         self._labels = [str(label_map[str(index)]) for index in range(len(label_map))]
         self._load_error = None
+        # region agent log
+        agent_log(
+            "app/inference.py:110",
+            "model_loaded",
+            {"labels_count": len(self._labels), "feature_count": len(self._feature_order)},
+            hypothesis_id="H3",
+        )
+        # endregion
         return ModelArtifacts(labels=self.labels, feature_order=list(self._feature_order))
 
     def classify_batch(self, flows: list[dict[str, Any]]) -> list[PredictionRow]:

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from app.debug_log import agent_log
+
 
 SQLITE_DT_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -40,10 +42,24 @@ class StatsStore:
         self._labels = labels
         self._lock = threading.Lock()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        # region agent log
+        agent_log(
+            "app/storage.py:45",
+            "sqlite_connect_start",
+            {"db_path": str(self._db_path), "parent_exists": self._db_path.parent.exists()},
+            hypothesis_id="H2",
+        )
+        # endregion
         self._connection = sqlite3.connect(self._db_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        # region agent log
+        agent_log("app/storage.py:54", "sqlite_connect_ok", {}, hypothesis_id="H2")
+        # endregion
 
     def initialize(self) -> None:
+        # region agent log
+        agent_log("app/storage.py:58", "sqlite_initialize_start", {}, hypothesis_id="H2")
+        # endregion
         with self._lock, self._connection:
             self._connection.executescript(
                 """
@@ -66,6 +82,9 @@ class StatsStore:
                     ON classified_events(source);
                 """
             )
+        # region agent log
+        agent_log("app/storage.py:84", "sqlite_initialize_ok", {}, hypothesis_id="H2")
+        # endregion
 
     def close(self) -> None:
         with self._lock:
