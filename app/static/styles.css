@@ -235,7 +235,6 @@ body::after {
 .summary-kpi,
 .stat-card,
 .label-row,
-.source-row,
 .warning-item,
 .empty-state,
 .chart-row {
@@ -301,6 +300,25 @@ body::after {
   gap: 0.55rem;
 }
 
+.class-guide {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.class-guide-item {
+  border: 2px solid rgba(66, 208, 242, 0.22);
+  background: rgba(10, 16, 38, 0.72);
+  padding: 0.8rem;
+}
+
+.class-guide-item p {
+  margin: 0.5rem 0 0;
+  color: var(--text-main);
+  line-height: 1.7;
+}
+
 .stat-value {
   display: block;
   font-size: clamp(0.9rem, 1.7vw, 1.3rem);
@@ -323,7 +341,6 @@ body::after {
 }
 
 .label-list,
-.source-list,
 .warning-list,
 .chart {
   display: grid;
@@ -342,7 +359,6 @@ body::after {
   gap: 0.75rem;
 }
 
-.source-row,
 .chart-row-heading {
   display: flex;
   align-items: center;
@@ -351,7 +367,6 @@ body::after {
 }
 
 .label-row-heading strong,
-.source-row strong,
 .chart-row-heading strong {
   font-size: 0.56rem;
   color: var(--text-main);
@@ -495,6 +510,10 @@ body::after {
   .cards-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .class-guide {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 780px) {
@@ -526,6 +545,7 @@ body::after {
   .intro-panel p,
   .summary-copy,
   .rules-list,
+  .class-guide-item p,
   .warning-item,
   .empty-state {
     font-size: 0.52rem;
@@ -546,6 +566,10 @@ body::after {
     grid-template-columns: 1fr;
   }
 
+  .class-guide {
+    grid-template-columns: 1fr;
+  }
+
   .topnav {
     gap: 0.2rem;
   }
@@ -562,7 +586,6 @@ body::after {
   .hero-metric strong,
   .summary-kpi strong,
   .label-row-heading strong,
-  .source-row strong,
   .chart-row-heading strong {
     font-size: 0.5rem;
   }

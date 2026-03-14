@@ -44,24 +44,6 @@ function renderLabelList(allTimeCounts, recentCounts) {
   });
 }
 
-function renderSources(sources) {
-  const list = document.getElementById("source-list");
-  if (!list) return;
-  list.innerHTML = "";
-
-  if (!Array.isArray(sources) || sources.length === 0) {
-    list.innerHTML = `<div class="empty-state">No internal flow sources have submitted data yet.</div>`;
-    return;
-  }
-
-  sources.forEach((source) => {
-    const row = document.createElement("div");
-    row.className = "source-row";
-    row.innerHTML = `<span>${source.source}</span><strong>${formatNumber(source.total)}</strong>`;
-    list.appendChild(row);
-  });
-}
-
 function renderWarnings(warnings) {
   const list = document.getElementById("warning-list");
   if (!list) return;
@@ -133,7 +115,6 @@ async function refresh() {
     });
 
     renderLabelList(data.all_time_counts || {}, data.recent_counts || {});
-    renderSources(data.sources || []);
     renderWarnings(data.warnings || []);
     renderHourlyChart(data.hourly || []);
   } catch (error) {
@@ -141,7 +122,6 @@ async function refresh() {
     setText("last-classified", "Unable to load summary");
     setText("total-events", "0");
     renderWarnings(["Unable to load the NIDS dashboard summary right now."]);
-    renderSources([]);
     renderHourlyChart([]);
   }
 }
