@@ -1,0 +1,69 @@
+name: Build Push and Update Infra
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out app repository
+        uses: actions/checkout@v4
+
+      - name: Set image name
+        run: echo "IMAGE_NAME=ghcr.io/spicyhek/personal-site" >> "$GITHUB_ENV"
+
+      - name: Set image tag
+        run: echo "IMAGE_TAG=sha-${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      - name: log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+
+      - name: Check out infra repository
+        uses: actions/checkout@v4
+        with:
+          repository: spicyhek/homelab-infra
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+          path: homelab-infra
+
+      - name: Update image tag in kustomization
+        working-directory: homelab-infra
+        run: |
+          sed -i "s|newTag: .*|newTag: ${IMAGE_TAG}|" k8s/apps/personal-site/kustomization.yml
+
+      - name: Commit and push infra change
+        working-directory: homelab-infra
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add k8s/apps/personal-site/kustomization.yml
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git commit -m "Deploy personal-site ${IMAGE_TAG}"
+          git push
