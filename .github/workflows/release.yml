@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set image name
-        run: echo "IMAGE_NAME=ghcr.io/spicyhek/personal-site" >> "$GITHUB_ENV"
+        run: echo "IMAGE_NAME=ghcr.io/spicyhek/mynids" >> "$GITHUB_ENV"
 
       - name: Set image tag
         run: echo "IMAGE_TAG=sha-${GITHUB_SHA}" >> "$GITHUB_ENV"
@@ -50,7 +50,7 @@ jobs:
       - name: Update image tag in kustomization
         working-directory: homelab-infra
         run: |
-          sed -i "s|newTag: .*|newTag: ${IMAGE_TAG}|" k8s/apps/personal-site/kustomization.yml
+          sed -i "s|newTag: .*|newTag: ${IMAGE_TAG}|" k8s/apps/nids/kustomization.yml
 
       - name: Commit and push infra change
         working-directory: homelab-infra
@@ -58,12 +58,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add k8s/apps/personal-site/kustomization.yml
+          git add k8s/apps/nids/kustomization.yml
 
           if git diff --cached --quiet; then
             echo "No changes to commit"
             exit 0
           fi
 
-          git commit -m "Deploy personal-site ${IMAGE_TAG}"
+          git commit -m "Deploy mynids ${IMAGE_TAG}"
           git push
