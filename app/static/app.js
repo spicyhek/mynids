@@ -9,6 +9,12 @@ const LABEL_META = [
   { key: "OTHER_ATTACK", target: "recent-other", className: "is-other" },
 ];
 
+function formatLabelName(value) {
+  return String(value || "")
+    .replace(/_/g, " / ")
+    .toLowerCase();
+}
+
 function formatNumber(value) {
   return new Intl.NumberFormat().format(Number(value || 0));
 }
@@ -35,7 +41,7 @@ function renderLabelList(allTimeCounts, recentCounts) {
     row.className = "label-row";
     row.innerHTML = `
       <div class="label-row-heading">
-        <span class="pill ${className}">${key.replace("_", " / ").toLowerCase()}</span>
+        <span class="pill ${className}">${formatLabelName(key)}</span>
         <strong>${formatNumber(allTimeCounts[key])}</strong>
       </div>
       <span class="meta-label">recent window: ${formatNumber(recentCounts[key])}</span>
@@ -72,25 +78,60 @@ function renderHourlyChart(hourly) {
     return;
   }
 
-  const maxTotal = Math.max(
-    ...hourly.map((bucket) => Object.values(bucket.counts || {}).reduce((sum, count) => sum + Number(count || 0), 0)),
-    1
-  );
+  const buckets = hourly.map((bucket) => {
+    const counts = LABEL_META.map(({ key, className }) => ({
+      key,
+      className,
+      count: Number((bucket.counts || {})[key] || 0),
+    }));
+    const total = counts.reduce((sum, item) => sum + item.count, 0);
+    return { bucket, counts, total };
+  });
 
-  hourly.forEach((bucket) => {
-    const total = Object.values(bucket.counts || {}).reduce((sum, count) => sum + Number(count || 0), 0);
-    const bar = document.createElement("div");
-    bar.className = "chart-row";
-    bar.innerHTML = `
-      <div class="chart-row-heading">
-        <span>${new Date(bucket.bucket_start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-        <strong>${formatNumber(total)}</strong>
+  const maxTotal = Math.max(...buckets.map(({ total }) => total), 1);
+
+  buckets.forEach(({ bucket, counts, total }) => {
+    const timeLabel = new Date(bucket.bucket_start).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    const activeCounts = counts.filter(({ count }) => count > 0);
+    const scaleWidth = total > 0 ? (total / maxTotal) * 100 : 0;
+    const segmentSummary = activeCounts
+      .map(({ key, count }) => `${formatLabelName(key)} ${formatNumber(count)}`)
+      .join(", ");
+    const segments = activeCounts
+      .map(
+        ({ key, className, count }) => `
+          <span
+            class="chart-segment ${className}"
+            style="width: ${(count / total) * 100}%"
+            title="${formatLabelName(key)}: ${formatNumber(count)}"
+          ></span>
+        `
+      )
+      .join("");
+
+    const row = document.createElement("div");
+    row.className = "chart-row";
+    if (total === 0) {
+      row.classList.add("is-empty");
+    }
+
+    row.innerHTML = `
+      <span class="chart-time">${timeLabel}</span>
+      <div
+        class="chart-track"
+        role="img"
+        aria-label="${timeLabel}: ${formatNumber(total)} total${segmentSummary ? `, ${segmentSummary}` : ""}"
+      >
+        <div class="chart-stack" style="width: ${scaleWidth}%;">
+          ${segments}
+        </div>
       </div>
-      <div class="chart-track">
-        <div class="chart-fill" style="width: ${(total / maxTotal) * 100}%"></div>
-      </div>
+      <strong class="chart-total">${formatNumber(total)}</strong>
     `;
-    chart.appendChild(bar);
+    chart.appendChild(row);
   });
 }
 

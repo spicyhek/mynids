@@ -345,7 +345,7 @@ body::after {
 .warning-list,
 .chart {
   display: grid;
-  gap: 0.5rem;
+  gap: 0.65rem;
 }
 
 .label-row {
@@ -360,15 +360,7 @@ body::after {
   gap: 0.75rem;
 }
 
-.chart-row-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-}
-
-.label-row-heading strong,
-.chart-row-heading strong {
+.label-row-heading strong {
   font-size: 0.56rem;
   color: var(--text-main);
 }
@@ -422,17 +414,79 @@ body::after {
   line-height: 1.8;
 }
 
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 0.15rem;
+}
+
+.chart-row {
+  display: grid;
+  grid-template-columns: minmax(74px, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.chart-time,
+.chart-total {
+  font-size: 0.56rem;
+  color: var(--text-main);
+  white-space: nowrap;
+}
+
+.chart-total {
+  justify-self: end;
+  text-align: right;
+}
+
 .chart-track {
+  position: relative;
   width: 100%;
-  height: 12px;
+  height: 18px;
+  padding: 2px;
   border: 2px solid rgba(66, 208, 242, 0.35);
-  background: rgba(9, 16, 62, 0.86);
+  background:
+    linear-gradient(90deg, rgba(18, 35, 92, 0.5), rgba(18, 35, 92, 0.18)),
+    rgba(9, 16, 62, 0.86);
   overflow: hidden;
 }
 
-.chart-fill {
+.chart-stack {
+  display: flex;
   height: 100%;
-  background: linear-gradient(90deg, #0ea5e9, #22c55e);
+  min-width: 0;
+  overflow: hidden;
+  box-shadow: 0 0 10px rgba(66, 208, 242, 0.18);
+}
+
+.chart-segment {
+  height: 100%;
+  min-width: 0;
+}
+
+.chart-segment + .chart-segment {
+  box-shadow: inset 2px 0 rgba(8, 10, 28, 0.72);
+}
+
+.chart-segment.is-benign {
+  background: linear-gradient(90deg, #1ea86a, var(--benign));
+}
+
+.chart-segment.is-botnet {
+  background: linear-gradient(90deg, #ff5f95, var(--botnet));
+}
+
+.chart-segment.is-dos {
+  background: linear-gradient(90deg, #ffbf30, var(--dos));
+}
+
+.chart-segment.is-other {
+  background: linear-gradient(90deg, #9f75f1, var(--other));
+}
+
+.chart-row.is-empty .chart-track {
+  opacity: 0.7;
 }
 
 .rules-list {
@@ -587,7 +641,15 @@ body::after {
   .hero-metric strong,
   .summary-kpi strong,
   .label-row-heading strong,
-  .chart-row-heading strong {
+  .chart-total {
     font-size: 0.5rem;
+  }
+
+  .chart-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .chart-time {
+    grid-column: 1 / -1;
   }
 }
