@@ -39,6 +39,7 @@ jobs:
           tags: |
             ${{ env.IMAGE_NAME }}:latest
             ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          platforms: linux/amd64.linux/arm64
 
       - name: Check out infra repository
         uses: actions/checkout@v4
