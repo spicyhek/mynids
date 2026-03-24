@@ -148,8 +148,10 @@ async function refresh() {
     const data = await loadSummary();
     setText("model-name", data.model_name);
     setText("last-classified", formatDate(data.last_classified_at));
+    setText("lifetime-packets", formatNumber(data.lifetime_packets));
     setText("total-events", formatNumber(data.total_events));
     setText("recent-window-label", `Last ${data.recent_window_minutes} minutes`);
+    setText("recent-classifications-window", `Last ${data.recent_window_minutes} minutes`);
 
     LABEL_META.forEach(({ key, target }) => {
       setText(target, formatNumber((data.recent_counts || {})[key]));
@@ -161,7 +163,9 @@ async function refresh() {
   } catch (error) {
     setText("model-name", "Unavailable");
     setText("last-classified", "Unable to load summary");
+    setText("lifetime-packets", "0");
     setText("total-events", "0");
+    setText("recent-classifications-window", "Last 60 minutes");
     renderWarnings(["Unable to load the NIDS dashboard summary right now."]);
     renderHourlyChart([]);
   }

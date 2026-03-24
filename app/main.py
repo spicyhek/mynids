@@ -108,6 +108,15 @@ def get_store() -> StatsStore:
     return app.state.store
 
 
+def _count_flow_packets(payload: FlowBatchRequest) -> int:
+    total_packets = 0
+    for flow in payload.flows:
+        features = flow.features or {}
+        total_packets += int(max(float(features.get("tot_fwd_pkts", 0.0)), 0.0))
+        total_packets += int(max(float(features.get("tot_bwd_pkts", 0.0)), 0.0))
+    return total_packets
+
+
 def get_warnings() -> list[str]:
     warnings: list[str] = []
     if getattr(app.state, "model_warning", None):
@@ -161,6 +170,7 @@ async def public_summary(
         generated_at=summary["generated_at"],
         model_name=settings.model_name,
         recent_window_minutes=settings.public_window_minutes,
+        lifetime_packets=summary["lifetime_packets"],
         total_events=summary["total_events"],
         recent_counts=summary["recent_counts"],
         all_time_counts=summary["all_time_counts"],
@@ -201,7 +211,11 @@ async def ingest_flows(
         ) from exc
 
     source = (payload.source or settings.default_source_name).strip() or settings.default_source_name
-    label_counts = store.record_predictions(source, rows)
+    label_counts = store.record_predictions(
+        source,
+        rows,
+        lifetime_packet_total=_count_flow_packets(payload),
+    )
     store.purge_old_events(settings.retention_hours)
     return IngestResponse(
         source=source,

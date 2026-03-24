@@ -80,6 +80,11 @@ class StatsStore:
 
                 CREATE INDEX IF NOT EXISTS idx_classified_events_source
                     ON classified_events(source);
+
+                CREATE TABLE IF NOT EXISTS lifetime_counters (
+                    name TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL
+                );
                 """
             )
         # region agent log
@@ -90,7 +95,9 @@ class StatsStore:
         with self._lock:
             self._connection.close()
 
-    def record_predictions(self, source: str, rows: list[PredictionRow]) -> Counter[str]:
+    def record_predictions(
+        self, source: str, rows: list[PredictionRow], lifetime_packet_total: int = 0
+    ) -> Counter[str]:
         created_at = to_sqlite_dt(utcnow())
         counts: Counter[str] = Counter()
         with self._lock, self._connection:
@@ -115,6 +122,22 @@ class StatsStore:
                     for row in rows
                 ],
             )
+            self._connection.execute(
+                """
+                INSERT INTO lifetime_counters (name, value)
+                VALUES ('classified_events', ?)
+                ON CONFLICT(name) DO UPDATE SET value = value + excluded.value
+                """,
+                (len(rows),),
+            )
+            self._connection.execute(
+                """
+                INSERT INTO lifetime_counters (name, value)
+                VALUES ('observed_packets', ?)
+                ON CONFLICT(name) DO UPDATE SET value = value + excluded.value
+                """,
+                (max(int(lifetime_packet_total), 0),),
+            )
         for row in rows:
             counts[row.predicted_label] += 1
         return counts
@@ -137,10 +160,17 @@ class StatsStore:
         recent_counts = {label: 0 for label in self._labels}
         hourly: dict[datetime, dict[str, int]] = {}
         sources: list[dict[str, int | str]] = []
+        lifetime_packets = 0
         total_events = 0
         last_classified_at: datetime | None = None
 
         with self._lock:
+            counter_row = self._connection.execute(
+                "SELECT value FROM lifetime_counters WHERE name = 'observed_packets'"
+            ).fetchone()
+            if counter_row is not None:
+                lifetime_packets = int(counter_row["value"])
+
             total_row = self._connection.execute(
                 "SELECT COUNT(*) AS total, MAX(observed_at) AS latest FROM classified_events"
             ).fetchone()
@@ -212,6 +242,7 @@ class StatsStore:
 
         return {
             "generated_at": now,
+            "lifetime_packets": lifetime_packets,
             "total_events": total_events,
             "recent_counts": recent_counts,
             "all_time_counts": all_time_counts,

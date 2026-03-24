@@ -44,8 +44,12 @@
             <h2 id="summary-title">Signal Summary</h2>
             <div class="summary-kpis">
               <div class="summary-kpi">
-                <span class="meta-label">Total classified</span>
+                <span class="meta-label">Total classified in the last 30 days</span>
                 <strong class="summary-value" id="total-events">0</strong>
+              </div>
+              <div class="summary-kpi">
+                <span class="meta-label">Lifetime packets observed</span>
+                <strong class="summary-value" id="lifetime-packets">0</strong>
               </div>
               <div class="summary-kpi">
                 <span class="meta-label">Recent window</span>
@@ -53,8 +57,8 @@
               </div>
             </div>
             <p class="summary-copy">
-              Counts below are aggregates generated from private internal
-              traffic inspection and model inference.
+              Counts below are aggregates generated from internal
+              traffic inspection and model inference retained over the last hour, day, and month.
             </p>
           </aside>
         </section>
@@ -62,6 +66,7 @@
         <section class="panel stats-panel" aria-labelledby="stats-title">
           <div class="section-heading">
             <h2 id="stats-title">Recent Classifications</h2>
+            <span class="meta-label" id="recent-classifications-window">last 60 minutes</span>
           </div>
           <div class="cards-grid">
             <article class="stat-card">
@@ -107,8 +112,8 @@
         <section class="content-grid">
           <article class="panel projects-panel" id="activity">
             <div class="section-heading">
-              <h2>All-Time Labels</h2>
-              <span class="meta-label">retained history</span>
+              <h2>Label Totals</h2>
+              <span class="meta-label">last month</span>
             </div>
             <div class="label-list" id="label-list"></div>
           </article>

@@ -37,6 +37,7 @@ class SummaryResponse(BaseModel):
     generated_at: datetime
     model_name: str
     recent_window_minutes: int
+    lifetime_packets: int
     total_events: int
     recent_counts: dict[str, int]
     all_time_counts: dict[str, int]

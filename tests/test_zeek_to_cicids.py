@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -135,12 +136,39 @@ class ZeekToCicidsTests(unittest.TestCase):
                         confidence=0.99,
                     )
                 ],
+                lifetime_packet_total=20,
             )
 
             summary = store.build_summary(recent_window_minutes=60, history_hours=24)
             self.assertEqual(summary["recent_counts"]["BENIGN"], 1)
             self.assertEqual(summary["all_time_counts"]["BENIGN"], 1)
+            self.assertEqual(summary["lifetime_packets"], 20)
             self.assertEqual(summary["sources"][0]["source"], "zeek-worker-node-a")
+            store.close()
+
+    def test_lifetime_packet_counter_survives_retention_purge(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "nids.sqlite3"
+            store = StatsStore(db_path, labels=["BENIGN", "BOTNET", "DOS_DDOS", "OTHER_ATTACK"])
+            store.initialize()
+            store.record_predictions(
+                "zeek-worker-node-a",
+                [
+                    PredictionRow(
+                        observed_at=utcnow() - timedelta(days=40),
+                        predicted_label="BENIGN",
+                        confidence=0.99,
+                    )
+                ],
+                lifetime_packet_total=20,
+            )
+
+            deleted = store.purge_old_events(retention_hours=24 * 30)
+            summary = store.build_summary(recent_window_minutes=60, history_hours=24)
+
+            self.assertEqual(deleted, 1)
+            self.assertEqual(summary["total_events"], 0)
+            self.assertEqual(summary["lifetime_packets"], 20)
             store.close()
 
 
