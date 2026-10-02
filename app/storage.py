@@ -87,6 +87,19 @@ class StatsStore:
                 );
                 """
             )
+            # This app inserts one AUTOINCREMENT row per classified flow. The
+            # sequence survives retention deletes and includes flows recorded
+            # before lifetime counters were introduced.
+            self._connection.execute(
+                """
+                INSERT INTO lifetime_counters (name, value)
+                VALUES (
+                    'classified_events',
+                    COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'classified_events'), 0)
+                )
+                ON CONFLICT(name) DO UPDATE SET value = MAX(value, excluded.value)
+                """
+            )
         # region agent log
         agent_log("app/storage.py:84", "sqlite_initialize_ok", {}, hypothesis_id="H2")
         # endregion
@@ -160,16 +173,18 @@ class StatsStore:
         recent_counts = {label: 0 for label in self._labels}
         hourly: dict[datetime, dict[str, int]] = {}
         sources: list[dict[str, int | str]] = []
+        lifetime_flows = 0
         lifetime_packets = 0
         total_events = 0
         last_classified_at: datetime | None = None
 
         with self._lock:
-            counter_row = self._connection.execute(
-                "SELECT value FROM lifetime_counters WHERE name = 'observed_packets'"
-            ).fetchone()
-            if counter_row is not None:
-                lifetime_packets = int(counter_row["value"])
+            counters = {
+                str(row["name"]): int(row["value"])
+                for row in self._connection.execute("SELECT name, value FROM lifetime_counters")
+            }
+            lifetime_flows = counters.get("classified_events", 0)
+            lifetime_packets = counters.get("observed_packets", 0)
 
             total_row = self._connection.execute(
                 "SELECT COUNT(*) AS total, MAX(observed_at) AS latest FROM classified_events"
@@ -242,6 +257,7 @@ class StatsStore:
 
         return {
             "generated_at": now,
+            "lifetime_flows": lifetime_flows,
             "lifetime_packets": lifetime_packets,
             "total_events": total_events,
             "recent_counts": recent_counts,

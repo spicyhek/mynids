@@ -1,6 +1,8 @@
 const SUMMARY_ENDPOINT = "/api/public/summary";
 const REFRESH_MS = 30000;
 const HOURS = 24;
+let refreshInProgress = false;
+let hasLoadedSummary = false;
 
 const LABEL_META = [
   { key: "BENIGN", target: "recent-benign", className: "is-benign" },
@@ -144,12 +146,20 @@ async function loadSummary() {
 }
 
 async function refresh() {
+  if (refreshInProgress) return;
+  refreshInProgress = true;
   try {
     const data = await loadSummary();
     setText("model-name", data.model_name);
     setText("last-classified", formatDate(data.last_classified_at));
-    setText("lifetime-packets", formatNumber(data.lifetime_packets));
+    setText("lifetime-flows", formatNumber(data.lifetime_flows));
     setText("total-events", formatNumber(data.total_events));
+    const retentionHours = Number(data.retention_hours);
+    const retentionWindow = retentionHours % 24 === 0
+      ? `last ${retentionHours / 24} days`
+      : `last ${retentionHours} hours`;
+    setText("retained-flows-label", `Flows classified in the ${retentionWindow}`);
+    setText("label-totals-window", retentionWindow);
     setText("recent-window-label", `Last ${data.recent_window_minutes} minutes`);
     setText("recent-classifications-window", `Last ${data.recent_window_minutes} minutes`);
 
@@ -160,14 +170,13 @@ async function refresh() {
     renderLabelList(data.all_time_counts || {}, data.recent_counts || {});
     renderWarnings(data.warnings || []);
     renderHourlyChart(data.hourly || []);
+    hasLoadedSummary = true;
   } catch (error) {
-    setText("model-name", "Unavailable");
-    setText("last-classified", "Unable to load summary");
-    setText("lifetime-packets", "0");
-    setText("total-events", "0");
-    setText("recent-classifications-window", "Last 60 minutes");
-    renderWarnings(["Unable to load the NIDS dashboard summary right now."]);
-    renderHourlyChart([]);
+    renderWarnings([hasLoadedSummary
+      ? "Unable to refresh the NIDS dashboard. Displayed values are from the last successful update."
+      : "Unable to load the NIDS dashboard summary. Retrying automatically."]);
+  } finally {
+    refreshInProgress = false;
   }
 }
 

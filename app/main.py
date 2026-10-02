@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -96,7 +96,10 @@ async def lifespan(_: FastAPI):
         hypothesis_id="H2",
     )
     # endregion
-    yield
+    try:
+        yield
+    finally:
+        store.close()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
@@ -159,9 +162,12 @@ async def healthz() -> HealthResponse:
 
 @app.get("/api/public/summary", response_model=SummaryResponse)
 async def public_summary(
+    response: Response,
     hours: int = Query(default=24, ge=1, le=settings.max_history_hours),
     store: StatsStore = Depends(get_store),
 ) -> SummaryResponse:
+    response.headers["Cache-Control"] = "no-store"
+    store.purge_old_events(settings.retention_hours)
     summary = store.build_summary(
         recent_window_minutes=settings.public_window_minutes,
         history_hours=hours,
@@ -170,6 +176,8 @@ async def public_summary(
         generated_at=summary["generated_at"],
         model_name=settings.model_name,
         recent_window_minutes=settings.public_window_minutes,
+        retention_hours=settings.retention_hours,
+        lifetime_flows=summary["lifetime_flows"],
         lifetime_packets=summary["lifetime_packets"],
         total_events=summary["total_events"],
         recent_counts=summary["recent_counts"],
