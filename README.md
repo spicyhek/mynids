@@ -13,16 +13,7 @@ The service has two surfaces:
 
 The site intentionally exposes only aggregate statistics.
 
-## Runtime Layout
-
-- `app/`: FastAPI service, SQLite stats storage, webpage, and model loading
-- `sensor/`: private flow helper for posting batches to the ingestion endpoint
-- root artifacts:
-  - `cicids2018_dense_model.keras`
-  - `scaler.joblib`
-  - `feature_order.json`
-  - `label_map.json`
-  - `label_encoder.joblib`
+## Zeek feature conversion
 
 All 80 features in `feature_order.json` are required for each flow. Since all 80 features are not possible to see directly with Zeek, some calculations and approximations are made:
 
