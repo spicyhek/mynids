@@ -25,6 +25,7 @@ class SummaryApiTests(unittest.TestCase):
             main.settings,
             db_path=Path(temp_dir.name) / "nids.sqlite3",
             retention_hours=24 * 28,
+            stale_after_seconds=90,
             ingest_token="test-token",
         )
         self.enterContext(patch.object(main, "settings", settings))
@@ -41,6 +42,7 @@ class SummaryApiTests(unittest.TestCase):
         self.assertEqual(data["lifetime_flows"], 1)
         self.assertEqual(data["lifetime_packets"], 20)
         self.assertEqual(data["retention_hours"], 672)
+        self.assertEqual(data["stale_after_seconds"], 90)
 
     def test_summary_expires_old_records_when_ingestion_has_stopped(self) -> None:
         self.store.record_predictions(

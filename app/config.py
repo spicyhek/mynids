@@ -26,6 +26,7 @@ class Settings:
     label_encoder_path: Path = _path_env("NIDS_LABEL_ENCODER_PATH", ROOT_DIR / "label_encoder.joblib")
     ingest_token: str = os.getenv("NIDS_INGEST_TOKEN", "")
     public_window_minutes: int = int(os.getenv("NIDS_PUBLIC_WINDOW_MINUTES", "60"))
+    stale_after_seconds: int = max(1, int(os.getenv("NIDS_STALE_AFTER_SECONDS", "300")))
     max_history_hours: int = int(os.getenv("NIDS_MAX_HISTORY_HOURS", "168"))
     retention_hours: int = int(os.getenv("NIDS_RETENTION_HOURS", "720"))
     default_source_name: str = os.getenv("NIDS_DEFAULT_SOURCE_NAME", "homelab-flow-bridge")

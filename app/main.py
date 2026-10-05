@@ -177,6 +177,7 @@ async def public_summary(
         model_name=settings.model_name,
         recent_window_minutes=settings.public_window_minutes,
         retention_hours=settings.retention_hours,
+        stale_after_seconds=settings.stale_after_seconds,
         lifetime_flows=summary["lifetime_flows"],
         lifetime_packets=summary["lifetime_packets"],
         total_events=summary["total_events"],
