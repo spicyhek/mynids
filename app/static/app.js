@@ -3,6 +3,9 @@ const REFRESH_MS = 30000;
 const HOURS = 24;
 let refreshInProgress = false;
 let hasLoadedSummary = false;
+let latestSummary = null;
+let summaryReceivedAt = 0;
+let summaryUnavailable = false;
 
 const LABEL_META = [
   { key: "BENIGN", target: "recent-benign", className: "is-benign" },
@@ -31,6 +34,49 @@ function formatDate(value) {
 function setText(id, value) {
   const node = document.getElementById(id);
   if (node) node.textContent = value;
+}
+
+function renderActivityStatus() {
+  const badge = document.getElementById("activity-badge");
+  if (!badge) return;
+
+  let state = "waiting";
+  let label = "Waiting for data";
+  let detail = "No classified flows received yet.";
+  const lastClassified = latestSummary?.last_classified_at;
+  const observedAt = lastClassified ? Date.parse(lastClassified) : NaN;
+  const generatedAt = Date.parse(latestSummary?.generated_at);
+  const configuredThreshold = Number(latestSummary?.stale_after_seconds);
+  const threshold = Number.isFinite(configuredThreshold) && configuredThreshold > 0
+    ? configuredThreshold : 300;
+  const thresholdLabel = threshold % 60 === 0
+    ? `${threshold / 60} minute${threshold === 60 ? "" : "s"}`
+    : `${threshold} second${threshold === 1 ? "" : "s"}`;
+
+  if (Number.isFinite(observedAt) && Number.isFinite(generatedAt)) {
+    // Use the server clock for event age, then advance it between responses.
+    const age = Math.max(0, generatedAt - observedAt) + Math.max(0, Date.now() - summaryReceivedAt);
+    const stale = age >= threshold * 1000;
+    state = stale ? "stale" : "live";
+    label = stale ? "Stale" : "Live";
+    detail = stale
+      ? `No classified flows in the last ${thresholdLabel}. Traffic may be quiet or the sensor may be delayed.`
+      : `Flow activity detected within the last ${thresholdLabel}.`;
+  } else if (Number(latestSummary?.lifetime_flows) > 0) {
+    state = "stale";
+    label = "Stale";
+    detail = "No recent flow timestamp is available.";
+  }
+
+  if (summaryUnavailable) {
+    state = hasLoadedSummary ? "stale" : "waiting";
+    label = hasLoadedSummary ? "Stale" : "Waiting for data";
+    detail = "Unable to confirm recent activity. Retrying automatically.";
+  }
+
+  badge.className = `pill activity-badge is-${state}`;
+  badge.textContent = label;
+  setText("activity-detail", detail);
 }
 
 function renderLabelList(allTimeCounts, recentCounts) {
@@ -146,10 +192,14 @@ async function loadSummary() {
 }
 
 async function refresh() {
+  renderActivityStatus();
   if (refreshInProgress) return;
   refreshInProgress = true;
   try {
     const data = await loadSummary();
+    latestSummary = data;
+    summaryReceivedAt = Date.now();
+    summaryUnavailable = false;
     setText("model-name", data.model_name);
     setText("last-classified", formatDate(data.last_classified_at));
     setText("lifetime-flows", formatNumber(data.lifetime_flows));
@@ -171,7 +221,10 @@ async function refresh() {
     renderWarnings(data.warnings || []);
     renderHourlyChart(data.hourly || []);
     hasLoadedSummary = true;
+    renderActivityStatus();
   } catch (error) {
+    summaryUnavailable = true;
+    renderActivityStatus();
     renderWarnings([hasLoadedSummary
       ? "Unable to refresh the NIDS dashboard. Displayed values are from the last successful update."
       : "Unable to load the NIDS dashboard summary. Retrying automatically."]);

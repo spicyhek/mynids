@@ -6,7 +6,7 @@ const vm = require("node:vm");
 
 const script = fs.readFileSync(path.join(__dirname, "../app/static/app.js"), "utf8");
 
-function dashboard(fetch) {
+function dashboard(fetch, clock = Date) {
   const nodes = new Map();
   const createNode = () => ({
     textContent: "",
@@ -18,6 +18,7 @@ function dashboard(fetch) {
   const context = vm.createContext({
     fetch,
     Intl,
+    Date: clock,
     document: {
       getElementById(id) {
         if (!nodes.has(id)) nodes.set(id, createNode());
@@ -32,6 +33,9 @@ function dashboard(fetch) {
 }
 
 const summary = {
+  generated_at: "2026-10-01T01:00:00Z",
+  last_classified_at: "2026-10-01T00:59:00Z",
+  stale_after_seconds: 300,
   model_name: "test-model",
   lifetime_flows: 123,
   lifetime_packets: 987654,
@@ -101,7 +105,74 @@ test("an initial failure does not invent a lifetime total and can recover", asyn
   await settle();
   assert.equal(app.nodes.has("lifetime-flows"), false);
   assert.match(app.nodes.get("warning-list").children.at(-1).textContent, /Retrying automatically/);
+  assert.equal(app.nodes.get("activity-badge").textContent, "Waiting for data");
   fail = false;
   await app.refresh();
   assert.equal(app.nodes.get("lifetime-flows").textContent, "123");
+  assert.equal(app.nodes.get("activity-badge").textContent, "Live");
+});
+
+test("recent flow activity is live and uses the server clock despite browser clock skew", async () => {
+  const app = dashboard(async () => ok());
+  await settle();
+  assert.equal(app.nodes.get("activity-badge").textContent, "Live");
+  assert.match(app.nodes.get("activity-badge").className, /is-live/);
+  assert.match(app.nodes.get("activity-detail").textContent, /5 minutes/);
+});
+
+test("activity becomes stale exactly at the configured inactivity threshold", async () => {
+  const app = dashboard(async () => ok({ ...summary, stale_after_seconds: 60 }));
+  await settle();
+  assert.equal(app.nodes.get("activity-badge").textContent, "Stale");
+  assert.match(app.nodes.get("activity-badge").className, /is-stale/);
+  assert.match(app.nodes.get("activity-detail").textContent, /last 1 minute\./);
+});
+
+test("an empty store waits for data, while expired history stays stale", async () => {
+  let data = { ...summary, last_classified_at: null, lifetime_flows: 0 };
+  const app = dashboard(async () => ok(data));
+  await settle();
+  assert.equal(app.nodes.get("activity-badge").textContent, "Waiting for data");
+  data = { ...data, lifetime_flows: 123 };
+  await app.refresh();
+  assert.equal(app.nodes.get("activity-badge").textContent, "Stale");
+});
+
+test("a failed refresh marks activity stale and a successful refresh restores live", async () => {
+  let fail = false;
+  const app = dashboard(async () => {
+    if (fail) throw new Error("network unavailable");
+    return ok();
+  });
+  await settle();
+  fail = true;
+  await app.refresh();
+  assert.equal(app.nodes.get("activity-badge").textContent, "Stale");
+  assert.match(app.nodes.get("activity-detail").textContent, /Unable to confirm/);
+  fail = false;
+  await app.refresh();
+  assert.equal(app.nodes.get("activity-badge").textContent, "Live");
+});
+
+test("activity ages into stale while a summary request is still pending", async () => {
+  let now = 0;
+  class Clock extends Date {
+    static now() { return now; }
+  }
+  let calls = 0;
+  let complete;
+  const app = dashboard(() => {
+    calls += 1;
+    if (calls === 1) return Promise.resolve(ok());
+    return new Promise((resolve) => { complete = resolve; });
+  }, Clock);
+  await settle();
+  assert.equal(app.nodes.get("activity-badge").textContent, "Live");
+  const pendingRefresh = app.refresh();
+  now = 240000;
+  await app.refresh();
+  assert.equal(calls, 2);
+  assert.equal(app.nodes.get("activity-badge").textContent, "Stale");
+  complete(ok());
+  await pendingRefresh;
 });
