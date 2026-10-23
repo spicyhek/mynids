@@ -8,7 +8,7 @@ from contextlib import closing
 from datetime import timedelta
 from pathlib import Path
 
-from app.storage import PredictionRow, StatsStore, utcnow
+from app.storage import FlowConflict, PredictionRow, StatsStore, utcnow
 
 
 LABELS = ["BENIGN", "BOTNET", "DOS_DDOS", "OTHER_ATTACK"]
@@ -122,6 +122,78 @@ class LifetimeFlowTests(unittest.TestCase):
                 future.result()
         self.assertEqual(self.summary(stores[0])["lifetime_flows"], 40)
         self.assertEqual(self.summary(stores[0])["total_events"], 40)
+
+    def test_concurrent_duplicates_survive_retention_and_restart(self):
+        stores = [self.open_store() for _ in range(4)]
+        row = PredictionRow(utcnow() - timedelta(days=40), "BENIGN", 0.9, "uid", 20, "hash")
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(lambda store: store.record_predictions("sensor", [row]), stores))
+        self.assertEqual(sum(sum(counts.values()) for counts in results), 1)
+        stores[0].purge_old_events(24)
+        restarted = self.open_store()
+        self.assertFalse(restarted.record_predictions("sensor", [row]))
+        summary = self.summary(restarted)
+        self.assertEqual((summary["lifetime_flows"], summary["lifetime_packets"]), (1, 20))
+        self.assertEqual(summary["total_events"], 0)
+        self.assertIsNotNone(summary["last_processed_at"])
+
+    def test_identity_conflict_rolls_back_whole_batch(self):
+        store = self.open_store()
+        store.record_predictions("sensor", [PredictionRow(utcnow(), "BENIGN", 0.9, "old", 20, "original")])
+        with self.assertRaises(FlowConflict):
+            store.record_predictions("sensor", [
+                PredictionRow(utcnow(), "BENIGN", 0.9, "new", 10, "new"),
+                PredictionRow(utcnow(), "BENIGN", 0.9, "old", 30, "changed"),
+            ])
+        summary = self.summary(store)
+        self.assertEqual((summary["lifetime_flows"], summary["lifetime_packets"]), (1, 20))
+        self.assertEqual(sum(store.record_predictions("sensor", [
+            PredictionRow(utcnow(), "BENIGN", 0.9, "new", 10, "new")]).values()), 1)
+
+    def test_future_records_are_excluded_from_windows_and_timestamps_have_distinct_meanings(self):
+        store = self.open_store()
+        store.record_predictions("sensor", [PredictionRow(utcnow() + timedelta(days=2), "BENIGN", 0.9)])
+        summary = self.summary(store)
+        self.assertEqual(sum(summary["recent_counts"].values()), 0)
+        self.assertEqual(sum(sum(bucket["counts"].values()) for bucket in summary["hourly"]), 0)
+        self.assertLess(summary["last_processed_at"], summary["last_observed_at"])
+        self.assertEqual(sum(summary["retained_counts"].values()), summary["total_events"])
+
+    def test_duplicate_reservation_rolls_back_with_counter_failure(self):
+        store = self.open_store()
+        store.record_predictions("sensor", [PredictionRow(utcnow(), "BENIGN", 0.9)], 10)
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            connection.execute("""CREATE TRIGGER fail_counter BEFORE UPDATE ON lifetime_counters
+                BEGIN SELECT RAISE(ABORT, 'failure'); END""")
+        row = PredictionRow(utcnow(), "BENIGN", 0.9, "uid", 20, "hash")
+        with self.assertRaises(sqlite3.IntegrityError):
+            store.record_predictions("sensor", [row])
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            connection.execute("DROP TRIGGER fail_counter")
+        self.assertEqual(sum(store.record_predictions("sensor", [row]).values()), 1)
+
+    def test_actual_legacy_schema_upgrade_preserves_totals_and_marks_unknown_packets(self):
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            connection.executescript("""
+                CREATE TABLE classified_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL,
+                    observed_at TEXT NOT NULL, predicted_label TEXT NOT NULL,
+                    confidence REAL NOT NULL, created_at TEXT NOT NULL
+                );
+                INSERT INTO classified_events
+                (source, observed_at, predicted_label, confidence, created_at)
+                VALUES ('old-sensor', '2024-01-01 00:00:00', 'BENIGN', 0.8, '2024-01-02 00:00:00');
+            """)
+        store = self.open_store()
+        summary = self.summary(store)
+        self.assertEqual(summary["lifetime_flows"], 1)
+        self.assertFalse(summary["packet_counts_complete"])
+        self.assertIn("legacy", summary["counter_provenance"])
+        self.assertLess(summary["last_observed_at"], summary["last_processed_at"])
+        store.purge_old_events(24)
+        summary = self.summary(store)
+        self.assertEqual(summary["lifetime_flows"], 1)
+        self.assertIsNotNone(summary["last_processed_at"])
 
 
 if __name__ == "__main__":

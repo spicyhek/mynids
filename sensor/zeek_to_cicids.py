@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
 import sys
 import time
+import random
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib import error, request
+
+if __package__ in (None, ""):
+    # Preserve the existing `python /app/sensor/zeek_to_cicids.py` entry point.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from app.validation import MAX_BATCH_SIZE, validate_event_time, validate_features
 
 
 PROTOCOL_NUMBERS = {
@@ -23,6 +32,10 @@ PROTOCOL_NUMBERS = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Convert Zeek conn.log JSON records into CICIDS-style feature batches."
+    )
+    parser.add_argument(
+        "--source-name", default=os.getenv("NIDS_SOURCE_NAME"),
+        help="Stable, unique sensor identity (preferred over source-prefix/NODE_NAME).",
     )
     parser.add_argument(
         "--log-path",
@@ -75,19 +88,24 @@ def parse_zeek_json_line(line: str) -> dict[str, Any] | None:
 
 
 def to_float(value: Any, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        raise ValueError("Zeek numeric fields cannot be booleans.")
     if value in (None, "-", ""):
         return default
     try:
         result = float(value)
-    except (TypeError, ValueError):
-        return default
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Zeek numeric field is invalid.") from exc
     if not math.isfinite(result):
-        return default
+        raise ValueError("Zeek numeric field must be finite.")
     return result
 
 
 def to_int(value: Any, default: int = 0) -> int:
-    return int(round(to_float(value, float(default))))
+    number = to_float(value, float(default))
+    if number < 0 or number > 2**53 - 1 or int(number) != number:
+        raise ValueError("Zeek count/port must be a nonnegative safe integer.")
+    return int(number)
 
 
 def safe_div(numerator: float, denominator: float) -> float:
@@ -97,7 +115,9 @@ def safe_div(numerator: float, denominator: float) -> float:
 
 
 def safe_non_negative(value: float) -> float:
-    return value if value > 0 else 0.0
+    if value < 0:
+        raise ValueError("Zeek duration and byte counts must be nonnegative.")
+    return value
 
 
 def history_count(history: str, letters: str) -> int:
@@ -105,10 +125,10 @@ def history_count(history: str, letters: str) -> int:
 
 
 def protocol_number(proto: Any) -> int:
-    if proto is None:
-        return 0
     text = str(proto).lower()
-    return PROTOCOL_NUMBERS.get(text, 0)
+    if text not in PROTOCOL_NUMBERS:
+        raise ValueError(f"Unsupported Zeek protocol: {text}")
+    return PROTOCOL_NUMBERS[text]
 
 
 def direction_stats(total_bytes: float, packets: int) -> tuple[float, float, float, float]:
@@ -128,11 +148,20 @@ def iat_stats(duration_us: float, packets: int) -> tuple[float, float, float, fl
 
 def normalize_timestamp(ts_value: float) -> tuple[float, str]:
     ts = to_float(ts_value)
-    dt = datetime.fromtimestamp(ts, tz=UTC).replace(microsecond=0)
+    dt = validate_event_time(datetime.fromtimestamp(ts, tz=UTC))
     return ts * 1_000_000.0, dt.isoformat().replace("+00:00", "Z")
 
 
 def conn_record_to_flow(record: dict[str, Any]) -> dict[str, Any]:
+    for name in ("uid", "ts", "orig_pkts", "resp_pkts", "id.orig_p", "id.resp_p", "proto"):
+        if record.get(name) in (None, "-", ""):
+            raise ValueError(f"Missing required Zeek field: {name}")
+    uid = record["uid"]
+    if not isinstance(uid, str) or not uid or len(uid) > 160 or any(c.isspace() for c in uid):
+        raise ValueError("Invalid Zeek uid.")
+    for name in ("id.orig_p", "id.resp_p"):
+        if to_int(record[name]) > 65535:
+            raise ValueError("Zeek port exceeds 65535.")
     duration_s = safe_non_negative(to_float(record.get("duration")))
     duration_us = duration_s * 1_000_000.0
     timestamp_us, event_time = normalize_timestamp(to_float(record.get("ts")))
@@ -204,10 +233,11 @@ def conn_record_to_flow(record: dict[str, Any]) -> dict[str, Any]:
         "bwd_iat_std": float(bwd_iat_std),
         "bwd_iat_max": float(bwd_iat_max),
         "bwd_iat_min": float(bwd_iat_min),
-        "fwd_psh_flags": float(history_count(history, "P")),
-        "bwd_psh_flags": float(history_count(history, "p")),
-        "fwd_urg_flags": float(history_count(history, "U")),
-        "bwd_urg_flags": float(history_count(history, "u")),
+        # conn.log history is compressed connection history, not a TCP flag counter.
+        "fwd_psh_flags": 0.0,
+        "bwd_psh_flags": 0.0,
+        "fwd_urg_flags": 0.0,
+        "bwd_urg_flags": 0.0,
         "fwd_header_len": float(fwd_header_len),
         "bwd_header_len": float(bwd_header_len),
         "fwd_pkts_s": safe_div(float(orig_pkts), duration_s),
@@ -220,9 +250,9 @@ def conn_record_to_flow(record: dict[str, Any]) -> dict[str, Any]:
         "fin_flag_cnt": float(history_count(history, "Ff")),
         "syn_flag_cnt": float(history_count(history, "SsHh")),
         "rst_flag_cnt": float(history_count(history, "Rr")),
-        "psh_flag_cnt": float(history_count(history, "Pp")),
+        "psh_flag_cnt": 0.0,
         "ack_flag_cnt": float(history_count(history, "Aa")),
-        "urg_flag_cnt": float(history_count(history, "Uu")),
+        "urg_flag_cnt": 0.0,
         "cwe_flag_count": 0.0,
         "ece_flag_cnt": 0.0,
         "down_up_ratio": safe_div(float(resp_pkts), float(orig_pkts)),
@@ -253,8 +283,11 @@ def conn_record_to_flow(record: dict[str, Any]) -> dict[str, Any]:
         "idle_min": 0.0,
         "src_port": float(to_int(record.get("id.orig_p"))),
     }
+    validate_features(features)
 
     return {
+        # Timestamp protects against a UID namespace being reused after sensor resets.
+        "flow_id": f"{uid}:{event_time}",
         "event_time": event_time,
         "features": features,
     }
@@ -265,134 +298,215 @@ def load_state(state_file: Path) -> dict[str, Any]:
         return {"offset": 0}
     try:
         parsed = json.loads(state_file.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        if not isinstance(parsed, dict) or type(parsed.get("offset")) is not int or parsed["offset"] < 0:
+            raise ValueError("Invalid checkpoint offset")
+        return parsed
+    except (ValueError, UnicodeError):
+        # Replaying is safe because identities are durably deduplicated by the API.
+        print("Invalid checkpoint: replaying available log with server deduplication.", file=sys.stderr)
         return {"offset": 0}
-    if not isinstance(parsed, dict):
-        return {"offset": 0}
-    return {"offset": int(parsed.get("offset", 0))}
 
 
-def save_state(state_file: Path, offset: int) -> None:
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps({"offset": offset}), encoding="utf-8")
+def atomic_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, allow_nan=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def save_state(state_file: Path, offset: int, **metadata: Any) -> None:
+    atomic_json(state_file, {"offset": offset, **metadata})
 
 
 def send_payload(endpoint: str, token: str, source_name: str, flows: list[dict[str, Any]]) -> dict[str, Any]:
-    payload = {"source": source_name, "flows": flows}
-    body = json.dumps(payload).encode("utf-8")
-    req = request.Request(
-        endpoint,
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "X-Ingest-Token": token,
-        },
-        method="POST",
-    )
+    body = json.dumps({"source": source_name, "flows": flows}, allow_nan=False).encode("utf-8")
+    req = request.Request(endpoint, data=body, headers={
+        "Content-Type": "application/json", "X-Ingest-Token": token,
+    }, method="POST")
     with request.urlopen(req, timeout=20) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
-def export_log_once(
-    *,
-    log_path: Path,
-    endpoint: str,
-    state_file: Path,
-    source_name: str,
-    token: str,
-    batch_size: int,
-) -> int:
-    state = load_state(state_file)
-    offset = int(state.get("offset", 0))
-    if not log_path.exists():
+def validate_ack(response: Any, source: str, flows: list[dict]) -> None:
+    if not isinstance(response, dict):
+        raise ValueError("Invalid ingest acknowledgment")
+    for key in ("received", "inserted", "duplicates"):
+        if type(response.get(key)) is not int or response[key] < 0:
+            raise ValueError("Invalid ingest acknowledgment counters")
+    if (response.get("source") != source or response["received"] != len(flows)
+            or response["inserted"] + response["duplicates"] != len(flows)
+            or response.get("flow_ids") != [flow["flow_id"] for flow in flows]):
+        raise ValueError("Ingest acknowledgment does not account for the complete batch")
+
+
+def quarantine(state_file: Path, reason: str, record: Any) -> None:
+    # Bounded diagnostic journal containing rejected records for investigation.
+    path = state_file.with_suffix(state_file.suffix + ".quarantine.jsonl")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size >= 1_048_576:
+        os.replace(path, path.with_suffix(path.suffix + ".1"))
+    representation = json.dumps(record, default=lambda value: value.decode("utf-8", errors="replace")
+                                if isinstance(value, bytes) else str(value))
+    entry = {"time": datetime.now(UTC).isoformat(), "reason": reason[:500],
+             "record_hash": hashlib.sha256(representation.encode()).hexdigest(),
+             "record": representation[:65536], "truncated": len(representation) > 65536}
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    print(f"Quarantined invalid record: {reason}", file=sys.stderr, flush=True)
+
+
+def deliver(endpoint: str, token: str, source: str, flows: list[dict], state_file: Path) -> int:
+    try:
+        response = send_payload(endpoint, token, source, flows)
+        validate_ack(response, source, flows)
+        return len(flows)
+    except error.HTTPError as exc:
+        if exc.code not in (409, 413, 422):
+            raise
+        if len(flows) > 1:
+            middle = len(flows) // 2
+            return (deliver(endpoint, token, source, flows[:middle], state_file)
+                    + deliver(endpoint, token, source, flows[middle:], state_file))
+        quarantine(state_file, f"Ingest rejected record with HTTP {exc.code}", flows[0])
         return 0
-    file_size = log_path.stat().st_size
-    if file_size < offset:
-        offset = 0
 
+
+def file_identity(path: Path) -> str:
+    stat = path.stat()
+    return f"{stat.st_dev}:{stat.st_ino}"
+
+
+def anchor(handle: Any, offset: int) -> str:
+    position = handle.tell()
+    handle.seek(0)
+    digest = hashlib.sha256(handle.read(min(offset, 4096)))
+    start = max(0, offset - 4096)
+    handle.seek(start)
+    digest.update(handle.read(offset - start))
+    handle.seek(position)
+    return digest.hexdigest()
+
+
+def export_log_once(*, log_path: Path, endpoint: str, state_file: Path,
+                    source_name: str, token: str, batch_size: int) -> int:
+    if not 1 <= batch_size <= MAX_BATCH_SIZE:
+        raise ValueError(f"batch_size must be between 1 and {MAX_BATCH_SIZE}")
+    spool = state_file.with_suffix(state_file.suffix + ".pending.json")
     exported = 0
-    pending_batch: list[tuple[int, dict[str, Any]]] = []
 
-    def flush_batch() -> bool:
-        nonlocal exported, pending_batch
-        if not pending_batch:
-            return True
-        flows = [flow for _, flow in pending_batch]
-        try:
-            response = send_payload(endpoint, token, source_name, flows)
-        except error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            print(f"HTTP error from ingest API: {exc.code} {detail}", file=sys.stderr, flush=True)
-            return False
-        except error.URLError as exc:
-            print(f"Connection error posting Zeek batch: {exc.reason}", file=sys.stderr, flush=True)
-            return False
+    def drain() -> None:
+        nonlocal exported
+        pending = json.loads(spool.read_text(encoding="utf-8"))
+        if pending["source"] != source_name or pending["endpoint"] != endpoint:
+            raise ValueError("Pending batch belongs to a different source/endpoint; restore its configuration first.")
+        exported += deliver(endpoint, token, source_name, pending["flows"], state_file)
+        atomic_json(state_file, pending["checkpoint"])
+        spool.unlink()
 
-        exported += len(flows)
-        save_state(state_file, pending_batch[-1][0])
-        print(
-            f"Posted {len(flows)} flow(s) from Zeek conn.log: stored={response.get('stored', 0)}",
-            flush=True,
-        )
-        pending_batch = []
-        return True
-
-    with log_path.open("r", encoding="utf-8") as handle:
+    if spool.exists():
+        drain()
+    state = load_state(state_file)
+    if state.get("source", source_name) != source_name:
+        raise ValueError("Checkpoint belongs to another source; use its original stable identity.")
+    if not log_path.exists():
+        return exported
+    current_identity = file_identity(log_path)
+    read_path = log_path
+    previous_identity = state.get("identity")
+    if previous_identity and previous_identity != current_identity:
+        # Drain a renamed file before switching to its replacement, even after restart.
+        candidates = [p for p in log_path.parent.glob(log_path.stem + "*")
+                      if p.is_file() and file_identity(p) == previous_identity]
+        if candidates:
+            read_path = candidates[0]
+        else:
+            raise OSError("Unread rotated log is unavailable; restore it beside the current log before retrying.")
+    identity = file_identity(read_path)
+    offset = state["offset"]
+    with read_path.open("rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if f"{opened.st_dev}:{opened.st_ino}" != identity:
+            raise OSError("Log rotated while opening it; retry with the preserved checkpoint.")
+        # A checkpoint anchor also detects copy-truncate followed by rapid regrowth.
+        if opened.st_size < offset or (state.get("anchor") and anchor(handle, offset) != state["anchor"]):
+            offset = 0
         handle.seek(offset)
+        flows: list[dict] = []
+
+        def checkpoint(*, eof: bool = False) -> dict:
+            return {"offset": offset, "identity": identity, "source": source_name,
+                    "anchor": anchor(handle, offset), "eof": eof}
+
+        def flush() -> None:
+            nonlocal flows
+            if flows:
+                atomic_json(spool, {"source": source_name, "endpoint": endpoint,
+                                    "flows": flows, "checkpoint": checkpoint()})
+                drain()
+                flows = []
+            else:
+                atomic_json(state_file, checkpoint())
+
+        complete_eof = False
         while True:
-            line = handle.readline()
+            start = handle.tell()
+            line = handle.readline(1_048_577)
             if not line:
+                complete_eof = True
+                break
+            if len(line) > 1_048_576:
+                raise ValueError("Zeek log line exceeds 1 MiB; checkpoint retained.")
+            if not line.endswith(b"\n"):
+                # A writer may still be appending this record. Never acknowledge its bytes.
+                handle.seek(start)
                 break
             offset = handle.tell()
             try:
-                parsed = parse_zeek_json_line(line)
-            except json.JSONDecodeError as exc:
-                print(f"Skipping malformed Zeek JSON: {exc}", file=sys.stderr, flush=True)
-                continue
-            except ValueError as exc:
-                print(f"Skipping unsupported Zeek line: {exc}", file=sys.stderr, flush=True)
-                continue
-            if parsed is None:
-                continue
-            pending_batch.append((offset, conn_record_to_flow(parsed)))
-            if len(pending_batch) >= batch_size and not flush_batch():
-                return exported
-
-    if not flush_batch():
-        return exported
-
-    if exported == 0:
-        save_state(state_file, offset)
+                parsed = parse_zeek_json_line(line.decode("utf-8"))
+                if parsed is not None:
+                    flows.append(conn_record_to_flow(parsed))
+            except (ValueError, OverflowError, OSError) as exc:
+                quarantine(state_file, str(exc), line)
+            if len(flows) >= batch_size:
+                flush()
+        flush()
+        atomic_json(state_file, checkpoint(eof=complete_eof))
+        if read_path != log_path and complete_eof:
+            save_state(state_file, 0, identity=current_identity, source=source_name)
     return exported
 
 
 def main() -> int:
     args = parse_args()
-    if not args.token:
-        print("Startup error: --token or NIDS_INGEST_TOKEN is required.", file=sys.stderr)
+    node_name = os.getenv("NODE_NAME")
+    source_name = args.source_name or (f"{args.source_prefix}-{node_name}" if node_name else None)
+    if not args.token or not source_name or not 1 <= args.batch_size <= MAX_BATCH_SIZE or args.poll_seconds <= 0:
+        print("Token, stable source identity, positive poll interval and batch size 1..1000 are required.", file=sys.stderr)
         return 2
-    log_path = Path(args.log_path)
-    state_file = Path(args.state_file)
-    node_name = os.getenv("NODE_NAME", "unknown-node")
-    source_name = f"{args.source_prefix}-{node_name}"
-
-    print(
-        f"Watching Zeek log {log_path} and posting CICIDS batches to {args.endpoint}",
-        flush=True,
-    )
-
+    failures = 0
     while True:
-        exported = export_log_once(
-            log_path=log_path,
-            endpoint=args.endpoint,
-            state_file=state_file,
-            source_name=source_name,
-            token=args.token,
-            batch_size=max(args.batch_size, 1),
-        )
-        if exported:
-            print(f"Exported {exported} flow(s) from Zeek conn.log", flush=True)
-        time.sleep(args.poll_seconds)
+        try:
+            exported = export_log_once(
+                log_path=Path(args.log_path), endpoint=args.endpoint, state_file=Path(args.state_file),
+                source_name=source_name, token=args.token, batch_size=args.batch_size,
+            )
+            failures = 0
+            if exported:
+                print(f"Acknowledged {exported} flow(s).", flush=True)
+        except (OSError, ValueError, error.URLError) as exc:
+            failures += 1
+            print(f"Export failed; checkpoint/pending batch retained: {exc}", file=sys.stderr, flush=True)
+        delay = min(60.0, args.poll_seconds * 2 ** min(failures, 6))
+        time.sleep(delay + (random.uniform(0, delay * 0.1) if failures else 0))
 
 
 if __name__ == "__main__":

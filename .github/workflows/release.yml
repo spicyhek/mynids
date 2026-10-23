@@ -26,6 +26,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
       - name: Run regression tests before publishing
         run: |
           python -m pip install -r requirements-test.txt

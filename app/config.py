@@ -31,5 +31,14 @@ class Settings:
     retention_hours: int = int(os.getenv("NIDS_RETENTION_HOURS", "720"))
     default_source_name: str = os.getenv("NIDS_DEFAULT_SOURCE_NAME", "homelab-flow-bridge")
 
+    def __post_init__(self) -> None:
+        for name in ("public_window_minutes", "stale_after_seconds", "max_history_hours", "retention_hours"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive.")
+        if self.public_window_minutes > self.retention_hours * 60:
+            raise ValueError("The recent window cannot exceed retention.")
+        if self.max_history_hours > self.retention_hours:
+            raise ValueError("The history window cannot exceed retention.")
+
 
 settings = Settings()

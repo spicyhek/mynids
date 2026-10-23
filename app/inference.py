@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.debug_log import agent_log
 from app.storage import PredictionRow, utcnow
+from app.validation import validate_event_time, validate_features
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,9 @@ class FlowClassifier:
         self._labels: list[str] = []
         self._feature_order: list[str] = []
         self._load_error: str | None = None
+        self._runtime_error: str | None = None
+        self._lock = threading.RLock()
+        self._inference_slot = threading.BoundedSemaphore(1)
 
     @property
     def labels(self) -> list[str]:
@@ -46,91 +50,74 @@ class FlowClassifier:
 
     @property
     def load_error(self) -> str | None:
-        return self._load_error
+        return self._load_error or self._runtime_error
 
     @property
     def loaded(self) -> bool:
         return self._model is not None and self._scaler is not None and self._np is not None
 
     def load(self) -> ModelArtifacts:
+        with self._lock:
+            try:
+                return self._load()
+            except Exception as exc:
+                self._model = self._scaler = self._np = None
+                self._load_error = f"Model initialization failed: {exc}"
+                raise RuntimeError(self._load_error) from exc
+
+    def _load(self) -> ModelArtifacts:
         if self.loaded:
             return ModelArtifacts(labels=self.labels, feature_order=list(self._feature_order))
 
-        # region agent log
-        agent_log(
-            "app/inference.py:60",
-            "load_start",
-            {
-                "model_path": str(self._model_path),
-                "model_exists": self._model_path.exists(),
-                "scaler_exists": self._scaler_path.exists(),
-                "feature_order_exists": self._feature_order_path.exists(),
-                "label_map_exists": self._label_map_path.exists(),
-                "label_encoder_exists": self._label_encoder_path.exists(),
-            },
-            hypothesis_id="H1",
-        )
-        # endregion
-        try:
-            import joblib
-            import numpy as np
-            import tensorflow as tf
-        except Exception as exc:  # pragma: no cover - depends on local runtime
-            self._load_error = (
-                "Unable to import model runtime dependencies. "
-                "Use the container or a Python version supported by TensorFlow. "
-                f"Original error: {exc}"
-            )
-            # region agent log
-            agent_log(
-                "app/inference.py:81",
-                "runtime_import_failed",
-                {"error_type": type(exc).__name__, "error": str(exc)},
-                hypothesis_id="H3",
-            )
-            # endregion
-            raise RuntimeError(self._load_error) from exc
-
-        # region agent log
-        agent_log("app/inference.py:88", "runtime_import_ok", {}, hypothesis_id="H3")
-        # endregion
+        import joblib
+        import numpy as np
+        import tensorflow as tf
 
         with self._feature_order_path.open("r", encoding="utf-8") as fh:
             feature_order = json.load(fh)
         with self._label_map_path.open("r", encoding="utf-8") as fh:
             label_map = json.load(fh)
 
-        self._np = np
-        self._tf = tf
-        self._scaler = joblib.load(self._scaler_path)
-        # Loading the label encoder validates that the artifact exists even though
-        # the label map is used as the canonical public class order.
-        joblib.load(self._label_encoder_path)
-        # region agent log
-        agent_log(
-            "app/inference.py:101",
-            "artifacts_loaded_before_model",
-            {"feature_count": len(feature_order), "label_count": len(label_map)},
-            hypothesis_id="H1",
-        )
-        # endregion
-        self._model = tf.keras.models.load_model(self._model_path)
-        self._feature_order = [str(name) for name in feature_order]
-        self._labels = [str(label_map[str(index)]) for index in range(len(label_map))]
+        if (not isinstance(feature_order, list) or not feature_order
+                or not all(isinstance(name, str) and name for name in feature_order)
+                or len(set(feature_order)) != len(feature_order)):
+            raise ValueError("Feature order must contain unique, nonempty names.")
+        if not isinstance(label_map, dict) or set(label_map) != {str(i) for i in range(len(label_map))}:
+            raise ValueError("Label map must use contiguous class indices.")
+        labels = [label_map[str(i)] for i in range(len(label_map))]
+        if not labels or not all(isinstance(label, str) and label for label in labels) or len(set(labels)) != len(labels):
+            raise ValueError("Class labels must be unique and nonempty.")
+        scaler = joblib.load(self._scaler_path)
+        encoder = joblib.load(self._label_encoder_path)
+        model = tf.keras.models.load_model(self._model_path, compile=False)
+        if list(encoder.classes_) != labels:
+            raise ValueError("Label encoder and label map disagree.")
+        if scaler.n_features_in_ != len(feature_order):
+            raise ValueError("Scaler feature count disagrees with feature order.")
+        if hasattr(scaler, "feature_names_in_") and list(scaler.feature_names_in_) != feature_order:
+            raise ValueError("Scaler feature names disagree with feature order.")
+        if len(model.input_shape) != 2 or model.input_shape[-1] != len(feature_order):
+            raise ValueError("Model input dimensions disagree with feature order.")
+        if len(model.output_shape) != 2 or model.output_shape[-1] != len(labels):
+            raise ValueError("Model output dimensions disagree with labels.")
+        # Publish the complete, validated bundle together.
+        self._np, self._tf, self._scaler, self._model = np, tf, scaler, model
+        self._feature_order, self._labels = feature_order, labels
         self._load_error = None
-        # region agent log
-        agent_log(
-            "app/inference.py:110",
-            "model_loaded",
-            {"labels_count": len(self._labels), "feature_count": len(self._feature_order)},
-            hypothesis_id="H3",
-        )
-        # endregion
+        self._runtime_error = None
         return ModelArtifacts(labels=self.labels, feature_order=list(self._feature_order))
 
     def classify_batch(self, flows: list[dict[str, Any]]) -> list[PredictionRow]:
         if not flows:
             return []
+        if not self._inference_slot.acquire(blocking=False):
+            raise RuntimeError("Inference is busy; retry this batch.")
+        try:
+            return self._classify_batch(flows)
+        finally:
+            self._inference_slot.release()
+
+    def _classify_batch(self, flows: list[dict[str, Any]]) -> list[PredictionRow]:
         if not self.loaded:
             self.load()
 
@@ -138,17 +125,33 @@ class FlowClassifier:
         assert self._scaler is not None
         assert self._model is not None
 
-        matrix = self._np.asarray(
-            [self._build_feature_vector(flow["features"]) for flow in flows],
-            dtype=self._np.float32,
-        )
-        scaled = self._scaler.transform(matrix)
-        probabilities = self._model.predict(scaled, verbose=0)
+        observed_times = [self._normalize_event_time(flow.get("event_time")) for flow in flows]
+        with self._np.errstate(over="ignore", invalid="ignore"):
+            matrix = self._np.asarray(
+                [self._build_feature_vector(flow["features"]) for flow in flows],
+                dtype=self._np.float32,
+            )
+        if not self._np.isfinite(matrix).all():
+            raise ValueError("Features exceed the float32 range.")
+        try:
+            scaled = self._scaler.transform(matrix)
+            if scaled.shape != matrix.shape or not self._np.isfinite(scaled).all():
+                raise RuntimeError("Scaler returned invalid features.")
+            probabilities = self._np.asarray(self._model.predict(scaled, verbose=0))
+            if (probabilities.shape != (len(flows), len(self._labels))
+                    or not self._np.isfinite(probabilities).all()
+                    or (probabilities < 0).any() or (probabilities > 1).any()
+                    or not self._np.allclose(probabilities.sum(axis=1), 1.0, rtol=0, atol=1e-5)):
+                raise RuntimeError("Model returned invalid probabilities.")
+        except Exception as exc:
+            self._runtime_error = f"Inference failed: {exc}"
+            raise RuntimeError(self._runtime_error) from exc
+        self._runtime_error = None
         winners = probabilities.argmax(axis=1)
 
         rows: list[PredictionRow] = []
         for index, flow in enumerate(flows):
-            observed_at = self._normalize_event_time(flow.get("event_time"))
+            observed_at = observed_times[index]
             label_index = int(winners[index])
             rows.append(
                 PredictionRow(
@@ -162,6 +165,10 @@ class FlowClassifier:
     def _build_feature_vector(self, features: dict[str, Any]) -> list[float]:
         if not isinstance(features, dict):
             raise ValueError("Each flow must include a features object.")
+        validate_features(features)
+        extra = set(features) - set(self._feature_order)
+        if extra:
+            raise ValueError(f"Unexpected features: {', '.join(sorted(extra)[:5])}")
 
         values: list[float] = []
         missing: list[str] = []
@@ -189,5 +196,5 @@ class FlowClassifier:
         if value is None:
             return utcnow()
         if isinstance(value, datetime):
-            return value.astimezone(UTC).replace(microsecond=0)
+            return validate_event_time(value).replace(microsecond=0)
         raise ValueError("event_time must be a valid ISO-8601 timestamp.")

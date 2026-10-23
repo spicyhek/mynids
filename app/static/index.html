@@ -26,9 +26,14 @@
               classified, with a running lifetime flow total and recent activity. It is powered by a deep learning model, specifically a
               multi-layer perceptron, trained on 9 million rows from the CICIDS2018 dataset,
               with 97% validation accuracy and weighted precision, recall, and F1-score of
-              0.98. 
+              0.98 on the training evaluation. Live traffic uses approximated Zeek features;
+              its detection accuracy has not yet been measured.
             </p>
             <div class="hero-meta">
+              <div class="hero-metric">
+                <span class="meta-label">Last flow observed</span>
+                <strong id="last-observed">Waiting for data</strong>
+              </div>
               <div class="hero-metric">
                 <span class="meta-label">Model</span>
                 <strong id="model-name">Loading...</strong>
@@ -51,8 +56,8 @@
             <h2 id="summary-title">Signal Summary</h2>
             <div class="summary-kpis">
               <div class="summary-kpi">
-                <span class="meta-label" id="retained-flows-label">Flows classified in the retention window</span>
-                <strong class="summary-value" id="total-events">0</strong>
+                <span class="meta-label" id="retained-flows-label">Flows observed in the retention window</span>
+                <strong class="summary-value" id="total-events">—</strong>
               </div>
               <div class="summary-kpi">
                 <span class="meta-label">Lifetime flows classified</span>
@@ -64,8 +69,8 @@
               </div>
             </div>
             <p class="summary-copy">
-              Lifetime traffic counts every successfully classified flow. Recent totals cover
-              the retention window; the lifetime total continues growing as older records expire.
+              New lifetime traffic counts each unique sensor flow once. Historical totals are preserved.
+              Retained totals use flow observation time; the lifetime total continues growing as older records expire.
             </p>
           </aside>
         </section>
@@ -78,19 +83,19 @@
           <div class="cards-grid">
             <article class="stat-card">
               <span class="meta-label">Recent benign</span>
-              <strong class="stat-value is-benign" id="recent-benign">0</strong>
+              <strong class="stat-value is-benign" id="recent-benign">—</strong>
             </article>
             <article class="stat-card">
               <span class="meta-label">Recent botnet</span>
-              <strong class="stat-value is-botnet" id="recent-botnet">0</strong>
+              <strong class="stat-value is-botnet" id="recent-botnet">—</strong>
             </article>
             <article class="stat-card">
               <span class="meta-label">Recent dos / ddos</span>
-              <strong class="stat-value is-dos" id="recent-dos">0</strong>
+              <strong class="stat-value is-dos" id="recent-dos">—</strong>
             </article>
             <article class="stat-card">
               <span class="meta-label">Recent other attack</span>
-              <strong class="stat-value is-other" id="recent-other">0</strong>
+              <strong class="stat-value is-other" id="recent-other">—</strong>
             </article>
           </div>
           <div class="class-guide" aria-label="Classification descriptions">

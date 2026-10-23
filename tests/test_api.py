@@ -55,7 +55,8 @@ class SummaryApiTests(unittest.TestCase):
         self.assertEqual(data["lifetime_packets"], 20)
 
     def test_ingestion_counts_classified_rows_and_rejects_failed_classification(self) -> None:
-        payload = {"source": "zeek", "flows": [{"features": {"tot_fwd_pkts": 12, "tot_bwd_pkts": 8}}]}
+        payload = {"source": "zeek", "flows": [{"flow_id": "test-flow", "event_time": utcnow().isoformat(),
+                   "features": {"tot_fwd_pkts": 12, "tot_bwd_pkts": 8}}]}
         with patch.object(main.classifier, "classify_batch", return_value=[PredictionRow(utcnow(), "BENIGN", 0.99)]):
             response = self.client.post("/api/internal/flows", json=payload, headers={"X-Ingest-Token": "test-token"})
         self.assertEqual(response.status_code, 200)
@@ -67,6 +68,71 @@ class SummaryApiTests(unittest.TestCase):
         data = self.client.get("/api/public/summary").json()
         self.assertEqual(data["lifetime_flows"], 1)
         self.assertEqual(data["lifetime_packets"], 20)
+
+    def payload(self):
+        return {"source": "zeek", "flows": [{"flow_id": "flow-1", "event_time": utcnow().isoformat(),
+                "features": {"tot_fwd_pkts": 12, "tot_bwd_pkts": 8}}]}
+
+    def post(self, payload):
+        return self.client.post("/api/internal/flows", json=payload, headers={"X-Ingest-Token": "test-token"})
+
+    def test_retries_only_increment_once_and_conflicting_identity_is_atomic(self):
+        payload = self.payload()
+        with patch.object(main.classifier, "classify_batch", return_value=[PredictionRow(utcnow(), "BENIGN", 0.99)]):
+            first = self.post(payload).json()
+            second = self.post(payload).json()
+            self.assertEqual((first["inserted"], second["inserted"], second["duplicates"]), (1, 0, 1))
+            self.assertEqual(second["flow_ids"], ["flow-1"])
+            payload["flows"][0]["features"]["tot_fwd_pkts"] = 13
+            self.assertEqual(self.post(payload).status_code, 409)
+        summary = self.client.get("/api/public/summary").json()
+        self.assertEqual((summary["lifetime_flows"], summary["lifetime_packets"]), (1, 20))
+        self.assertEqual(summary["retained_packets"], 20)
+        self.assertTrue(summary["packet_counts_complete"])
+        self.assertEqual(summary["retained_counts"], summary["all_time_counts"])
+
+    def test_invalid_inputs_never_reach_classifier(self):
+        with patch.object(main.classifier, "classify_batch") as classify:
+            for value in (-1, 1.5, True, "12", 2**53, 10**400):
+                payload = self.payload()
+                payload["flows"][0]["features"]["tot_fwd_pkts"] = value
+                self.assertEqual(self.post(payload).status_code, 422)
+            for timestamp in ("2026-01-01T00:00:00", (utcnow() + timedelta(days=1)).isoformat()):
+                payload = self.payload()
+                payload["flows"][0]["event_time"] = timestamp
+                self.assertEqual(self.post(payload).status_code, 422)
+            payload = self.payload()
+            payload["flows"] *= 1001
+            self.assertEqual(self.post(payload).status_code, 422)
+            classify.assert_not_called()
+
+    def test_invalid_prediction_batch_does_not_mutate_storage(self):
+        for rows in ([], [PredictionRow(utcnow(), "BENIGN", 1.7)], [PredictionRow(utcnow(), "UNKNOWN", 0.9)]):
+            with patch.object(main.classifier, "classify_batch", return_value=rows):
+                self.assertEqual(self.post(self.payload()).status_code, 503)
+        self.assertEqual(self.client.get("/api/public/summary").json()["lifetime_flows"], 0)
+
+    def test_auth_and_current_readiness(self):
+        self.assertEqual(self.client.post("/api/internal/flows", json=self.payload()).status_code, 403)
+        self.assertEqual(self.client.get("/readyz").status_code, 503)
+        with patch.object(main.classifier, "_model", object()), patch.object(main.classifier, "_scaler", object()), patch.object(main.classifier, "_np", object()):
+            self.assertEqual(self.client.get("/readyz").status_code, 200)
+            with patch.object(main.classifier, "_runtime_error", "bad scores"):
+                self.assertEqual(self.client.get("/readyz").status_code, 503)
+
+    def test_nonfinite_json_is_rejected_without_error_serialization_failure(self):
+        import json
+        payload = self.payload()
+        payload["flows"][0]["features"]["tot_fwd_pkts"] = float("nan")
+        response = self.client.post("/api/internal/flows", content=json.dumps(payload),
+            headers={"X-Ingest-Token": "test-token", "Content-Type": "application/json"})
+        self.assertEqual(response.status_code, 422)
+        self.assertNotIn("NaN", response.text)
+
+    def test_oversized_ingestion_body_is_rejected(self):
+        response = self.client.post("/api/internal/flows", content=b" " * (8 * 1024 * 1024 + 1),
+                                   headers={"X-Ingest-Token": "test-token"})
+        self.assertEqual(response.status_code, 413)
 
 
 if __name__ == "__main__":

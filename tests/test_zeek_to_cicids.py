@@ -36,6 +36,11 @@ SAMPLE_CONN_RECORD = {
 }
 
 
+def acknowledge(endpoint, token, source, flows):
+    return {"source": source, "received": len(flows), "inserted": len(flows), "duplicates": 0,
+            "flow_ids": [flow["flow_id"] for flow in flows]}
+
+
 class ZeekToCicidsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -74,7 +79,7 @@ class ZeekToCicidsTests(unittest.TestCase):
             state_file = temp_path / "state.json"
             log_path.write_text(json.dumps(SAMPLE_CONN_RECORD) + "\n", encoding="utf-8")
 
-            with patch("sensor.zeek_to_cicids.send_payload", return_value={"stored": 1}) as send_payload:
+            with patch("sensor.zeek_to_cicids.send_payload", side_effect=acknowledge) as send_payload:
                 exported = export_log_once(
                     log_path=log_path,
                     endpoint="http://nids.default.svc.cluster.local/api/internal/flows",
@@ -108,7 +113,7 @@ class ZeekToCicidsTests(unittest.TestCase):
                 captured_payload["token"] = token
                 captured_payload["source"] = source_name
                 captured_payload["flows"] = flows
-                return {"stored": len(flows)}
+                return acknowledge(endpoint, token, source_name, flows)
 
             with patch("sensor.zeek_to_cicids.send_payload", side_effect=fake_send):
                 export_log_once(

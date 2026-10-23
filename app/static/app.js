@@ -43,7 +43,7 @@ function renderActivityStatus() {
   let state = "waiting";
   let label = "Waiting for data";
   let detail = "No classified flows received yet.";
-  const lastClassified = latestSummary?.last_classified_at;
+  const lastClassified = latestSummary?.last_observed_at;
   const observedAt = lastClassified ? Date.parse(lastClassified) : NaN;
   const generatedAt = Date.parse(latestSummary?.generated_at);
   const configuredThreshold = Number(latestSummary?.stale_after_seconds);
@@ -184,11 +184,49 @@ function renderHourlyChart(hourly) {
 }
 
 async function loadSummary() {
-  const response = await fetch(`${SUMMARY_ENDPOINT}?hours=${HOURS}`, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`Status ${response.status}`);
+  const controller = new AbortController();
+  let timer;
+  try {
+    return await Promise.race([
+      (async () => {
+        const response = await fetch(`${SUMMARY_ENDPOINT}?hours=${HOURS}`, {
+          cache: "no-store", signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`Status ${response.status}`);
+        return validateSummary(await response.json());
+      })(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error("Summary request timed out"));
+        }, 10000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
-  return response.json();
+}
+
+function validateSummary(data) {
+  const count = (value) => Number.isSafeInteger(value) && value >= 0;
+  const date = (value) => typeof value === "string" && Number.isFinite(Date.parse(value));
+  const counts = (value) => value && typeof value === "object"
+    && Object.keys(value).length === LABEL_META.length
+    && LABEL_META.every(({ key }) => count(value[key]));
+  if (!data || typeof data.model_name !== "string" || !date(data.generated_at)
+      || !["lifetime_flows", "lifetime_packets", "total_events", "retained_packets"].every((key) => count(data[key]))
+      || !["retention_hours", "recent_window_minutes", "stale_after_seconds"].every((key) => count(data[key]) && data[key] > 0)
+      || !counts(data.retained_counts) || !counts(data.recent_counts)
+      || !["last_observed_at", "last_processed_at"].every((key) => data[key] === null || date(data[key]))
+      || !Array.isArray(data.warnings) || !data.warnings.every((item) => typeof item === "string")
+      || !Array.isArray(data.hourly)
+      || !data.hourly.every((bucket) => bucket && date(bucket.bucket_start) && counts(bucket.counts))
+      || Object.values(data.retained_counts).reduce((a, b) => a + b, 0) !== data.total_events
+      || data.total_events > data.lifetime_flows
+      || LABEL_META.some(({ key }) => data.recent_counts[key] > data.retained_counts[key])) {
+    throw new Error("Invalid summary response");
+  }
+  return data;
 }
 
 async function refresh() {
@@ -201,14 +239,15 @@ async function refresh() {
     summaryReceivedAt = Date.now();
     summaryUnavailable = false;
     setText("model-name", data.model_name);
-    setText("last-classified", formatDate(data.last_classified_at));
+    setText("last-classified", formatDate(data.last_processed_at));
+    setText("last-observed", formatDate(data.last_observed_at));
     setText("lifetime-flows", formatNumber(data.lifetime_flows));
     setText("total-events", formatNumber(data.total_events));
     const retentionHours = Number(data.retention_hours);
     const retentionWindow = retentionHours % 24 === 0
       ? `last ${retentionHours / 24} days`
       : `last ${retentionHours} hours`;
-    setText("retained-flows-label", `Flows classified in the ${retentionWindow}`);
+    setText("retained-flows-label", `Flows observed in the ${retentionWindow}`);
     setText("label-totals-window", retentionWindow);
     setText("recent-window-label", `Last ${data.recent_window_minutes} minutes`);
     setText("recent-classifications-window", `Last ${data.recent_window_minutes} minutes`);
@@ -217,7 +256,7 @@ async function refresh() {
       setText(target, formatNumber((data.recent_counts || {})[key]));
     });
 
-    renderLabelList(data.all_time_counts || {}, data.recent_counts || {});
+    renderLabelList(data.retained_counts, data.recent_counts);
     renderWarnings(data.warnings || []);
     renderHourlyChart(data.hourly || []);
     hasLoadedSummary = true;
