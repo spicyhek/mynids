@@ -1,6 +1,8 @@
-fastapi
-joblib
-numpy
-scikit-learn
-tensorflow
-uvicorn[standard]
+fastapi==0.142.2
+pydantic==2.13.5
+joblib==1.4.2
+numpy==2.1.3
+scikit-learn==1.6.1
+tensorflow==2.19.0
+keras==3.10.0
+uvicorn[standard]==0.54.0

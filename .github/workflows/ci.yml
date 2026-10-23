@@ -1,0 +1,22 @@
+name: Validate NIDS
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: python -m pip install -r requirements.txt -r requirements-test.txt
+      - run: python -m unittest discover -s tests -v
+      - run: node --test tests/dashboard.test.cjs
+      - run: python -m tools.smoke_model

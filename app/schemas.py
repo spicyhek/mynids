@@ -2,23 +2,35 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.validation import MAX_BATCH_SIZE, validate_event_time, validate_features
 
 
 class FlowRecord(BaseModel):
-    event_time: datetime | None = None
-    features: dict[str, float] = Field(default_factory=dict)
+    model_config = ConfigDict(extra="forbid")
+    flow_id: str = Field(min_length=1, max_length=200, pattern=r"^\S+$")
+    event_time: datetime
+    features: dict[str, float] = Field(min_length=2, max_length=80)
+
+    _validate_time = field_validator("event_time")(validate_event_time)
+    _validate_features = field_validator("features", mode="before")(validate_features)
 
 
 class FlowBatchRequest(BaseModel):
-    source: str | None = None
-    flows: list[FlowRecord] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    source: str = Field(min_length=1, max_length=128)
+    flows: list[FlowRecord] = Field(min_length=1, max_length=MAX_BATCH_SIZE)
 
 
 class IngestResponse(BaseModel):
     source: str
     accepted: int
     stored: int
+    received: int
+    inserted: int
+    duplicates: int
+    flow_ids: list[str]
     labels: dict[str, int]
     generated_at: datetime
 
@@ -26,6 +38,14 @@ class IngestResponse(BaseModel):
 class SourceCount(BaseModel):
     source: str
     total: int
+
+
+class SensorStatus(BaseModel):
+    source: str
+    last_received_at: datetime
+    last_observed_at: datetime
+    lag_seconds: int
+    stale: bool
 
 
 class TimeBucket(BaseModel):
@@ -44,9 +64,16 @@ class SummaryResponse(BaseModel):
     total_events: int
     recent_counts: dict[str, int]
     all_time_counts: dict[str, int]
+    retained_counts: dict[str, int]
+    retained_packets: int
+    packet_counts_complete: bool
+    counter_provenance: str
     hourly: list[TimeBucket]
     sources: list[SourceCount]
     last_classified_at: datetime | None
+    last_observed_at: datetime | None
+    last_processed_at: datetime | None
+    sensors: list[SensorStatus]
     ingest_enabled: bool
     warnings: list[str]
 

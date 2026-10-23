@@ -1,0 +1,16 @@
+{
+  "uid": "smoke-tcp-connection",
+  "ts": 1710200000.25,
+  "id.orig_p": 52344,
+  "id.resp_p": 443,
+  "proto": "tcp",
+  "duration": 1.5,
+  "orig_bytes": 4096,
+  "resp_bytes": 2048,
+  "orig_ip_bytes": 4920,
+  "resp_ip_bytes": 2864,
+  "orig_pkts": 12,
+  "resp_pkts": 8,
+  "history": "ShADadFf",
+  "missed_bytes": 0
+}
