@@ -96,6 +96,13 @@ class FlowClassifier:
             raise ValueError("Scaler feature count disagrees with feature order.")
         if hasattr(scaler, "feature_names_in_") and list(scaler.feature_names_in_) != feature_order:
             raise ValueError("Scaler feature names disagree with feature order.")
+        if "timestamp" in feature_order:
+            timestamp_index = feature_order.index("timestamp")
+            if (getattr(scaler, "mean_", None) is None
+                    or getattr(scaler, "var_", None) is None
+                    or scaler.mean_[timestamp_index] != 0.0
+                    or scaler.var_[timestamp_index] != 0.0):
+                raise ValueError("Timestamp preprocessing requires a constant-zero training feature.")
         if len(model.input_shape) != 2 or model.input_shape[-1] != len(feature_order):
             raise ValueError("Model input dimensions disagree with feature order.")
         if len(model.output_shape) != 2 or model.output_shape[-1] != len(labels):
@@ -133,6 +140,11 @@ class FlowClassifier:
             )
         if not self._np.isfinite(matrix).all():
             raise ValueError("Features exceed the float32 range.")
+        if "timestamp" in self._feature_order:
+            # The shipped model was trained with a constant-zero timestamp.
+            # Normalize only its input matrix: retaining the original payload keeps
+            # event times and deduplication hashes compatible with queued/old flows.
+            matrix[:, self._feature_order.index("timestamp")] = 0.0
         try:
             scaled = self._scaler.transform(matrix)
             if scaled.shape != matrix.shape or not self._np.isfinite(scaled).all():
