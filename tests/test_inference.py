@@ -31,6 +31,35 @@ class InferenceValidationTests(unittest.TestCase):
         self.assertEqual(row.predicted_label, "BENIGN")
         self.assertEqual(row.confidence, 0.8)
 
+    def test_timestamp_is_zero_before_scaling_without_mutating_payload(self):
+        classifier = self.classifier()
+        classifier._feature_order.insert(1, "timestamp")
+        classifier._scaler.transform = Mock(side_effect=lambda matrix: matrix)
+        flow = self.flow()
+        flow["features"]["timestamp"] = 1710200000250000.0
+        original_features = dict(flow["features"])
+        row = classifier.classify_batch([flow])[0]
+        matrix = classifier._scaler.transform.call_args.args[0]
+        np.testing.assert_array_equal(matrix, [[2.0, 0.0, 3.0, 10.0]])
+        np.testing.assert_array_equal(classifier._model.predict.call_args.args[0], matrix)
+        self.assertEqual(flow["features"], original_features)
+        self.assertEqual(row.observed_at, flow["event_time"].replace(microsecond=0))
+
+    def test_timestamp_normalization_does_not_bypass_input_validation(self):
+        for value in (float("nan"), float("inf"), 1e100, "1710200000250000", True, None):
+            with self.subTest(value=value):
+                classifier = self.classifier()
+                classifier._feature_order.append("timestamp")
+                flow = self.flow()
+                flow["features"]["timestamp"] = value
+                with self.assertRaises(ValueError):
+                    classifier.classify_batch([flow])
+                classifier._model.predict.assert_not_called()
+        classifier = self.classifier()
+        classifier._feature_order.append("timestamp")
+        with self.assertRaisesRegex(ValueError, "Missing required features"):
+            classifier.classify_batch([self.flow()])
+
     def test_invalid_model_outputs_are_rejected(self):
         for scores in ([[np.nan, 1]], [[np.inf, 0]], [[-0.1, 1.1]], [[0.1, 0.1]],
                        [[1, 0, 0]], [], [[1, 0], [0, 1]], [1, 0]):
@@ -90,3 +119,30 @@ class InferenceValidationTests(unittest.TestCase):
                 model.output_shape = (None, 2)
                 self.assertEqual(classifier.load().labels, encoder.classes_)
                 self.assertTrue(classifier.loaded)
+
+    def test_timestamp_training_contract_is_checked_on_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "features.json").write_text(json.dumps(["timestamp", "tot_fwd_pkts", "tot_bwd_pkts"]))
+            (root / "labels.json").write_text(json.dumps({"0": "BENIGN", "1": "ATTACK"}))
+            encoder = SimpleNamespace(classes_=["BENIGN", "ATTACK"])
+            model = SimpleNamespace(input_shape=(None, 3), output_shape=(None, 2))
+            tf = SimpleNamespace(keras=SimpleNamespace(models=SimpleNamespace(load_model=lambda *a, **kw: model)))
+            for mean, variance, valid in ((0, 0, True), (1, 0, False), (0, 1, False),
+                                          (np.nan, 0, False), (0, np.nan, False), (None, None, False)):
+                with self.subTest(mean=mean, variance=variance):
+                    classifier = FlowClassifier(model_path=root / "model", scaler_path=root / "scaler",
+                        feature_order_path=root / "features.json", label_map_path=root / "labels.json",
+                        label_encoder_path=root / "encoder")
+                    scaler = SimpleNamespace(n_features_in_=3,
+                        mean_=None if mean is None else np.array([mean, 2, 3]),
+                        var_=None if variance is None else np.array([variance, 1, 1]))
+                    with patch.dict("sys.modules", {"tensorflow": tf}), patch("joblib.load",
+                            side_effect=lambda p: scaler if p.name == "scaler" else encoder):
+                        if valid:
+                            classifier.load()
+                            self.assertTrue(classifier.loaded)
+                        else:
+                            with self.assertRaisesRegex(RuntimeError, "constant-zero"):
+                                classifier.load()
+                            self.assertFalse(classifier.loaded)

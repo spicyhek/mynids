@@ -110,6 +110,7 @@ def evaluate(records: Iterable[dict], classifier, batch_size: int = 100) -> dict
         },
         "limitations": [
             "Results apply only to this labeled dataset; absent classes have zero support.",
+            "Feature diagnostics describe submitted values before classifier preprocessing (timestamp is zeroed for this model).",
             "Winning scores are not calibrated probabilities of correctness.",
             "Training-standard-deviation comparisons are heuristic distribution diagnostics.",
         ],

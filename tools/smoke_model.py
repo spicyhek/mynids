@@ -21,16 +21,20 @@ def main() -> None:
     artifacts = classifier.load()
     conn = json.loads((Path(__file__).parent / "fixtures" / "smoke_conn.json").read_text())
     flow = FlowRecord.model_validate(conn_record_to_flow(conn)).model_dump()
-    first = classifier.classify_batch([flow, flow])
+    shifted = FlowRecord.model_validate(conn_record_to_flow({**conn, "ts": conn["ts"] + 86400})).model_dump()
+    first = classifier.classify_batch([flow, shifted])
     second = classifier.classify_batch([flow])
     if len(first) != 2 or any(
         row.predicted_label != second[0].predicted_label or abs(row.confidence - second[0].confidence) > 1e-5
         for row in first
     ):
         raise RuntimeError("Model smoke test produced inconsistent predictions.")
+    if first[0].observed_at == first[1].observed_at:
+        raise RuntimeError("Model preprocessing lost the real observation time.")
     print(json.dumps({"status": "ok", "features": len(artifacts.feature_order),
                       "classes": artifacts.labels, "prediction": second[0].predicted_label,
                       "confidence": second[0].confidence,
+                      "timestamp_preprocessing": "constant zero; observation time preserved",
                       "note": "Runtime validation only; this fixture has no ground-truth label."}))
 
 
