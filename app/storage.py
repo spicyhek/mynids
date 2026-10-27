@@ -4,6 +4,7 @@ import sqlite3
 import threading
 import math
 from collections import Counter
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -76,6 +77,7 @@ class StatsStore:
         # endregion
         self._connection = sqlite3.connect(self._db_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA journal_mode=WAL")
         # region agent log
         agent_log("app/storage.py:54", "sqlite_connect_ok", {}, hypothesis_id="H2")
         # endregion
@@ -125,6 +127,12 @@ class StatsStore:
                     last_observed_at TEXT NOT NULL,
                     last_processed_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS retained_totals (
+                    label TEXT PRIMARY KEY,
+                    events INTEGER NOT NULL,
+                    packets INTEGER NOT NULL,
+                    known_packets INTEGER NOT NULL
+                );
                 """
             )
             self._connection.execute("BEGIN IMMEDIATE")
@@ -144,6 +152,44 @@ class StatsStore:
             self._connection.execute(
                 """CREATE INDEX IF NOT EXISTS idx_classified_events_unvalidated
                    ON classified_events(id) WHERE validation_status = 'unvalidated'"""
+            )
+            # Backfill once on upgrade, before installing triggers. A populated
+            # table is maintained transactionally by inserts and retention deletes.
+            if not self._connection.execute("SELECT 1 FROM retained_totals LIMIT 1").fetchone():
+                self._connection.execute(
+                    """INSERT INTO retained_totals (label, events, packets, known_packets)
+                    SELECT CASE WHEN validation_status = 'unvalidated' THEN 'UNVALIDATED'
+                                ELSE predicted_label END,
+                           COUNT(*), COALESCE(SUM(packet_count), 0), COUNT(packet_count)
+                    FROM classified_events GROUP BY 1"""
+                )
+            self._connection.execute(
+                """CREATE TRIGGER IF NOT EXISTS classified_events_retained_insert
+                AFTER INSERT ON classified_events BEGIN
+                    INSERT INTO retained_totals (label, events, packets, known_packets)
+                    VALUES (CASE WHEN NEW.validation_status = 'unvalidated' THEN 'UNVALIDATED'
+                                 ELSE NEW.predicted_label END,
+                            1, COALESCE(NEW.packet_count, 0), NEW.packet_count IS NOT NULL)
+                    ON CONFLICT(label) DO UPDATE SET
+                        events = events + excluded.events,
+                        packets = packets + excluded.packets,
+                        known_packets = known_packets + excluded.known_packets;
+                END"""
+            )
+            self._connection.execute(
+                """CREATE TRIGGER IF NOT EXISTS classified_events_retained_delete
+                AFTER DELETE ON classified_events BEGIN
+                    UPDATE retained_totals SET
+                        events = events - 1,
+                        packets = packets - COALESCE(OLD.packet_count, 0),
+                        known_packets = known_packets - (OLD.packet_count IS NOT NULL)
+                    WHERE label = CASE WHEN OLD.validation_status = 'unvalidated'
+                                       THEN 'UNVALIDATED' ELSE OLD.predicted_label END;
+                END"""
+            )
+            self._connection.execute(
+                """CREATE INDEX IF NOT EXISTS idx_classified_events_summary
+                   ON classified_events(observed_at, validation_status, predicted_label, source)"""
             )
             # This app inserts one AUTOINCREMENT row per classified flow. The
             # sequence survives retention deletes and includes flows recorded
@@ -166,13 +212,14 @@ class StatsStore:
                 ("legacy totals preserved; exact deduplication begins at upgrade" if legacy else
                  "unique source/flow IDs; packets represented by ingested flows",),
             )
-            self._connection.execute(
-                """
-                INSERT OR IGNORE INTO sensor_status
-                SELECT source, MAX(created_at), MAX(observed_at), MAX(created_at)
-                FROM classified_events GROUP BY source
-                """
-            )
+            if not self._connection.execute("SELECT 1 FROM sensor_status LIMIT 1").fetchone():
+                self._connection.execute(
+                    """
+                    INSERT OR IGNORE INTO sensor_status
+                    SELECT source, MAX(created_at), MAX(observed_at), MAX(created_at)
+                    FROM classified_events GROUP BY source
+                    """
+                )
         # region agent log
         agent_log("app/storage.py:84", "sqlite_initialize_ok", {}, hypothesis_id="H2")
         # endregion
@@ -182,8 +229,10 @@ class StatsStore:
             self._connection.close()
 
     def check_ready(self) -> None:
-        with self._lock:
-            self._connection.execute("SELECT value FROM lifetime_counters LIMIT 1").fetchone()
+        # An independent WAL reader does not queue behind a long summary or
+        # retention operation on the application's connection lock.
+        with closing(sqlite3.connect(self._db_path, timeout=1)) as connection:
+            connection.execute("SELECT value FROM lifetime_counters LIMIT 1").fetchone()
 
     def record_predictions(
         self, source: str, rows: list[PredictionRow], lifetime_packet_total: int = 0
@@ -268,14 +317,23 @@ class StatsStore:
                 raise OverflowError("Lifetime counter exceeds the supported integer range.")
         return counts
 
-    def purge_old_events(self, retention_hours: int) -> int:
+    def purge_old_events(self, retention_hours: int, max_batches: int | None = None) -> int:
         cutoff = to_sqlite_dt(utcnow() - timedelta(hours=retention_hours))
-        with self._lock, self._connection:
-            cursor = self._connection.execute(
-                "DELETE FROM classified_events WHERE observed_at < ?",
-                (cutoff,),
-            )
-            return cursor.rowcount
+        deleted = 0
+        batches = 0
+        while max_batches is None or batches < max_batches:
+            with self._lock, self._connection:
+                cursor = self._connection.execute(
+                    """DELETE FROM classified_events WHERE id IN
+                       (SELECT id FROM classified_events WHERE observed_at < ? LIMIT 1000)""",
+                    (cutoff,),
+                )
+                count = cursor.rowcount
+            deleted += count
+            batches += 1
+            if count < 1000:
+                break
+        return deleted
 
     def build_summary(self, recent_window_minutes: int, history_hours: int, stale_after_seconds: int = 300) -> dict:
         now = utcnow()
@@ -301,13 +359,14 @@ class StatsStore:
             lifetime_flows = counters.get("classified_events", 0)
             lifetime_packets = counters.get("observed_packets", 0)
 
-            total_row = self._connection.execute(
-                """SELECT COUNT(*) AS total, COALESCE(SUM(packet_count), 0) AS packets,
-                COUNT(packet_count) AS known_packets FROM classified_events"""
-            ).fetchone()
-            total_events = int(total_row["total"])
-            retained_packets = int(total_row["packets"])
-            packet_counts_complete = int(total_row["known_packets"]) == total_events
+            retained_packets = 0
+            known_packets = 0
+            for row in self._connection.execute("SELECT * FROM retained_totals"):
+                all_time_counts[str(row["label"])] = int(row["events"])
+                retained_packets += int(row["packets"])
+                known_packets += int(row["known_packets"])
+            total_events = sum(all_time_counts.values())
+            packet_counts_complete = known_packets == total_events
             sensor_rows = self._connection.execute("SELECT * FROM sensor_status ORDER BY source").fetchall()
             last_classified_at = max(
                 (from_sqlite_dt(row["last_processed_at"]) for row in sensor_rows if row["last_processed_at"]),
@@ -319,17 +378,6 @@ class StatsStore:
             provenance = self._connection.execute(
                 "SELECT value FROM store_metadata WHERE name = 'counter_provenance'"
             ).fetchone()["value"]
-
-            for row in self._connection.execute(
-                """
-                SELECT CASE WHEN validation_status = 'unvalidated' THEN 'UNVALIDATED'
-                       ELSE predicted_label END AS classification, COUNT(*) AS total
-                FROM classified_events
-                GROUP BY classification
-                """
-            ):
-                label = str(row["classification"])
-                all_time_counts[label] = int(row["total"])
 
             for row in self._connection.execute(
                 """

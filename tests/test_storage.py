@@ -223,6 +223,33 @@ class LifetimeFlowTests(unittest.TestCase):
         self.assertEqual(self.summary(reopened)["lifetime_flows"], 1)
         self.assertEqual(dict(reopened.record_predictions("sensor", [row])), {})
 
+    def test_retained_totals_remain_exact_after_duplicate_and_purge(self):
+        store = self.open_store()
+        old = utcnow() - timedelta(days=40)
+        rows = [
+            PredictionRow(old, "BENIGN", 0.9, "old", 4, "old-hash"),
+            PredictionRow(utcnow(), "DOS_DDOS", 0.9, "v6", 2, "v6-hash", 58),
+            PredictionRow(utcnow(), "BENIGN", 0.9, "new", 3, "new-hash"),
+        ]
+        store.record_predictions("sensor", rows)
+        store.record_predictions("sensor", rows)
+        self.assertEqual(store.purge_old_events(24 * 28), 1)
+        summary = self.summary(store)
+        self.assertEqual(summary["retained_counts"], {
+            "BENIGN": 1, "BOTNET": 0, "DOS_DDOS": 0,
+            "OTHER_ATTACK": 0, "UNVALIDATED": 1,
+        })
+        self.assertEqual((summary["total_events"], summary["retained_packets"],
+                          summary["lifetime_flows"]), (2, 5, 3))
+        self.assertTrue(summary["packet_counts_complete"])
+        store.initialize()
+        self.assertEqual(self.summary(store)["total_events"], 2)
+
+    def test_readiness_does_not_wait_for_summary_connection_lock(self):
+        store = self.open_store()
+        with store._lock:
+            store.check_ready()
+
 
 if __name__ == "__main__":
     unittest.main()
