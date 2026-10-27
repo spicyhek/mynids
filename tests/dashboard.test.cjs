@@ -47,9 +47,9 @@ const summary = {
   retained_packets: 20,
   retention_hours: 672,
   recent_window_minutes: 60,
-  recent_counts: { BENIGN: 10, BOTNET: 0, DOS_DDOS: 0, OTHER_ATTACK: 0 },
-  retained_counts: { BENIGN: 10, BOTNET: 0, DOS_DDOS: 0, OTHER_ATTACK: 0 },
-  hourly: [{ bucket_start: "2026-10-01T01:00:00Z", counts: { BENIGN: 10, BOTNET: 0, DOS_DDOS: 0, OTHER_ATTACK: 0 } }],
+  recent_counts: { BENIGN: 10, BOTNET: 0, DOS_DDOS: 0, OTHER_ATTACK: 0, UNVALIDATED: 0 },
+  retained_counts: { BENIGN: 10, BOTNET: 0, DOS_DDOS: 0, OTHER_ATTACK: 0, UNVALIDATED: 0 },
+  hourly: [{ bucket_start: "2026-10-01T01:00:00Z", counts: { BENIGN: 10, BOTNET: 0, DOS_DDOS: 0, OTHER_ATTACK: 0, UNVALIDATED: 0 } }],
   warnings: [],
 };
 const ok = (data = summary) => ({ ok: true, json: async () => data });
@@ -134,7 +134,7 @@ test("activity becomes stale exactly at the configured inactivity threshold", as
 });
 
 test("an empty store waits for data, while expired history stays stale", async () => {
-  const zeroCounts = { BENIGN: 0, BOTNET: 0, DOS_DDOS: 0, OTHER_ATTACK: 0 };
+  const zeroCounts = { BENIGN: 0, BOTNET: 0, DOS_DDOS: 0, OTHER_ATTACK: 0, UNVALIDATED: 0 };
   let data = { ...summary, last_classified_at: null, last_observed_at: null, last_processed_at: null,
     lifetime_flows: 0, total_events: 0, retained_counts: zeroCounts, recent_counts: zeroCounts, hourly: [] };
   const app = dashboard(async () => ok(data));
@@ -155,6 +155,8 @@ test("invalid summary data never replaces the last valid display", async () => {
     { ...summary, total_events: 9 },
     { ...summary, lifetime_packets: -1 },
     { ...summary, last_observed_at: "invalid" },
+    { ...summary, retained_counts: { ...summary.retained_counts, UNVALIDATED: undefined } },
+    { ...summary, recent_counts: { ...summary.recent_counts, UNVALIDATED: -1 } },
   ]) {
     data = invalid;
     await app.refresh();
@@ -162,6 +164,24 @@ test("invalid summary data never replaces the last valid display", async () => {
     assert.equal(app.nodes.get("total-events").textContent, "10");
     assert.equal(app.nodes.get("activity-badge").textContent, "Stale");
   }
+});
+
+test("unvalidated ICMPv6 has a separate counter, label row and hourly segment", async () => {
+  const counts = { BENIGN: 0, BOTNET: 0, DOS_DDOS: 0, OTHER_ATTACK: 0, UNVALIDATED: 10 };
+  const app = dashboard(async () => ok({ ...summary, retained_counts: counts, recent_counts: counts,
+    hourly: [{ bucket_start: summary.generated_at, counts }] }));
+  await settle();
+  assert.equal(app.nodes.get("recent-unvalidated").textContent, "10");
+  assert.equal(app.nodes.get("recent-benign").textContent, "0");
+  assert.equal(app.nodes.get("recent-dos").textContent, "0");
+  assert.equal(app.nodes.get("total-events").textContent, "10");
+  const labels = app.nodes.get("label-list").children;
+  assert.equal(labels.length, 5);
+  assert.match(labels.at(-1).innerHTML, /unvalidated ICMPv6/);
+  const chart = app.nodes.get("hourly-chart").children[0].innerHTML;
+  assert.match(chart, /is-unvalidated/);
+  assert.doesNotMatch(chart, /is-dos/);
+  assert.equal(app.nodes.get("activity-badge").textContent, "Live");
 });
 
 test("a stalled request times out, aborts and allows a later refresh", async () => {

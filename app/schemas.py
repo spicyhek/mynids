@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -33,6 +34,20 @@ class IngestResponse(BaseModel):
     flow_ids: list[str]
     labels: dict[str, int]
     generated_at: datetime
+
+
+class EventResponse(BaseModel):
+    id: int
+    source: str
+    flow_id: str | None
+    observed_at: datetime
+    created_at: datetime
+    predicted_label: str
+    confidence: float
+    packet_count: int | None
+    protocol: int | None
+    validation_status: Literal["legacy", "classified", "unvalidated"]
+    validation_reason: str | None
 
 
 class SourceCount(BaseModel):

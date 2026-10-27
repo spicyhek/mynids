@@ -38,12 +38,15 @@ def main() -> None:
     icmpv6_predictions = classifier.classify_batch([icmpv6_flow])
     if len(icmpv6_predictions) != 1:
         raise RuntimeError("Model did not return an ICMPv6 prediction.")
+    if icmpv6_predictions[0].summary_label != "UNVALIDATED":
+        raise RuntimeError("ICMPv6 prediction was not marked unvalidated.")
     print(json.dumps({"status": "ok", "features": len(artifacts.feature_order),
                       "classes": artifacts.labels, "prediction": second[0].predicted_label,
                       "confidence": second[0].confidence,
                       "timestamp_preprocessing": "constant zero; observation time preserved",
                       "icmpv6_protocol": icmpv6_flow["features"]["protocol"],
                       "icmpv6_prediction": icmpv6_predictions[0].predicted_label,
+                      "icmpv6_status": icmpv6_predictions[0].validation_status,
                       "note": "Runtime validation only; this fixture has no ground-truth label."}))
 
 

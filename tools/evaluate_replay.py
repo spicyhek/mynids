@@ -10,6 +10,7 @@ from typing import Iterable
 import numpy as np
 
 from app.schemas import FlowRecord
+from app.storage import UNVALIDATED
 from sensor.zeek_to_cicids import conn_record_to_flow
 from tools.smoke_model import make_classifier
 
@@ -20,6 +21,7 @@ def evaluate(records: Iterable[dict], classifier, batch_size: int = 100) -> dict
     artifacts = classifier.load()
     labels, names = artifacts.labels, artifacts.feature_order
     confusion = {actual: dict.fromkeys(labels, 0) for actual in labels}
+    operational_counts = dict.fromkeys([*labels, UNVALIDATED], 0)
     total = 0
     confidence_sum = 0.0
     confident_errors = 0
@@ -54,6 +56,7 @@ def evaluate(records: Iterable[dict], classifier, batch_size: int = 100) -> dict
             far_from_training[:] += (np.abs((matrix - scaler.mean_) / scale) > 5).sum(axis=0)
         for (actual, _), predicted in zip(batch, predictions):
             confusion[actual][predicted.predicted_label] += 1
+            operational_counts[predicted.summary_label] += 1
             confidence_sum += predicted.confidence
             confident_errors += int(actual != predicted.predicted_label and predicted.confidence >= 0.9)
         total += size
@@ -95,6 +98,7 @@ def evaluate(records: Iterable[dict], classifier, batch_size: int = 100) -> dict
     false_positives = benign_support - benign.get("BENIGN", 0)
     return {
         "records": total, "confusion_matrix": confusion, "per_class": metrics,
+        "operational_counts": operational_counts,
         "accuracy": sum(confusion[label][label] for label in labels) / total,
         "macro_f1": sum(metric["f1"] for metric in metrics.values()) / len(labels),
         "weighted_f1": sum(metric["f1"] * metric["support"] for metric in metrics.values()) / total,
@@ -110,6 +114,7 @@ def evaluate(records: Iterable[dict], classifier, batch_size: int = 100) -> dict
         },
         "limitations": [
             "Results apply only to this labeled dataset; absent classes have zero support.",
+            "Accuracy and confusion metrics describe raw model labels; operational_counts separates unvalidated ICMPv6.",
             "Feature diagnostics describe submitted values before classifier preprocessing (timestamp is zeroed for this model).",
             "Winning scores are not calibrated probabilities of correctness.",
             "Training-standard-deviation comparisons are heuristic distribution diagnostics.",

@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.responses import FileResponse, JSONResponse
@@ -19,8 +20,8 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.inference import FlowClassifier
 from app.limits import IngestBodyLimit
-from app.schemas import FlowBatchRequest, HealthResponse, IngestResponse, SummaryResponse
-from app.storage import FlowConflict, StatsStore
+from app.schemas import EventResponse, FlowBatchRequest, HealthResponse, IngestResponse, SummaryResponse
+from app.storage import FlowConflict, StatsStore, UNVALIDATED
 
 logger = logging.getLogger(__name__)
 classifier = FlowClassifier(
@@ -141,6 +142,8 @@ def public_summary(
         warnings.append("One or more sensors have not delivered flows recently; traffic may be quiet or delayed.")
     if not summary["packet_counts_complete"]:
         warnings.append("Retained packet totals exclude historical flows without packet counts.")
+    if summary["recent_counts"][UNVALIDATED]:
+        warnings.append("ICMPv6 traffic is unvalidated and is counted separately from benign and attack predictions.")
     return SummaryResponse(
         **summary, model_name=settings.model_name,
         recent_window_minutes=settings.public_window_minutes,
@@ -169,6 +172,7 @@ def ingest_flows(payload: FlowBatchRequest, store: StatsStore = Depends(get_stor
         identified_rows.append(replace(
             row, flow_id=flow.flow_id, payload_hash=hashlib.sha256(canonical.encode()).hexdigest(),
             packet_count=int(flow.features["tot_fwd_pkts"]) + int(flow.features["tot_bwd_pkts"]),
+            protocol=int(flow.features["protocol"]) if "protocol" in flow.features else None,
         ))
     try:
         counts = store.record_predictions(payload.source, identified_rows)
@@ -187,6 +191,20 @@ def ingest_flows(payload: FlowBatchRequest, store: StatsStore = Depends(get_stor
 
 
 def _ordered_counts(counts: Counter[str]) -> dict[str, int]:
-    ordered = dict.fromkeys(classifier.labels or DEFAULT_LABELS, 0)
+    ordered = dict.fromkeys([*(classifier.labels or DEFAULT_LABELS), UNVALIDATED], 0)
     ordered.update(counts)
     return ordered
+
+
+@app.get("/api/internal/events", response_model=list[EventResponse],
+         dependencies=[Depends(require_ingest_token)])
+def internal_events(
+    response: Response,
+    limit: int = Query(default=100, ge=1, le=200),
+    before_id: int | None = Query(default=None, ge=1, le=2**63 - 1),
+    validation_status: Literal["legacy", "classified", "unvalidated"] | None = None,
+    store: StatsStore = Depends(get_store),
+) -> list[dict]:
+    response.headers["Cache-Control"] = "no-store"
+    store.purge_old_events(settings.retention_hours)
+    return store.list_events(limit=limit, before_id=before_id, validation_status=validation_status)

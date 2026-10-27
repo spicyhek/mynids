@@ -44,6 +44,50 @@ class SummaryApiTests(unittest.TestCase):
         self.assertEqual(data["retention_hours"], 672)
         self.assertEqual(data["stale_after_seconds"], 90)
 
+    def test_icmpv6_is_separate_and_raw_predictions_are_private(self):
+        payload = {"source": "zeek", "flows": [
+            {"flow_id": f"test-{i}", "event_time": utcnow().isoformat(),
+             "features": {"tot_fwd_pkts": 2, "tot_bwd_pkts": 2, "protocol": protocol}}
+            for i, protocol in enumerate((58, 58, 6, 1))
+        ]}
+        labels = ["DOS_DDOS", "BENIGN", "BOTNET", "OTHER_ATTACK"]
+        # The API attaches protocol metadata even if a classifier implementation
+        # returns only the four raw labels. Clients cannot choose their status.
+        rows = [PredictionRow(utcnow(), label, 0.99) for label in labels]
+        with patch.object(main.classifier, "classify_batch", return_value=rows):
+            first = self.post(payload)
+            second = self.post(payload)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["labels"], {
+            "BENIGN": 0, "BOTNET": 1, "DOS_DDOS": 0, "OTHER_ATTACK": 1, "UNVALIDATED": 2})
+        self.assertEqual(second.json()["duplicates"], 4)
+        summary = self.client.get("/api/public/summary").json()
+        self.assertEqual(summary["recent_counts"], first.json()["labels"])
+        self.assertEqual(summary["retained_counts"], first.json()["labels"])
+        self.assertEqual(summary["lifetime_flows"], 4)
+        self.assertEqual(summary["lifetime_packets"], 16)
+        self.assertEqual(sum(summary["retained_counts"].values()), summary["total_events"])
+        self.assertEqual(sum(b["counts"]["UNVALIDATED"] for b in summary["hourly"]), 2)
+        self.assertTrue(any("ICMPv6" in warning for warning in summary["warnings"]))
+        self.assertNotIn("flow_id", str(summary))
+        self.assertEqual(self.client.get("/api/internal/events").status_code, 403)
+        self.assertEqual(self.client.get("/api/internal/events", headers={"X-Ingest-Token": "wrong"}).status_code, 403)
+        headers = {"X-Ingest-Token": "test-token"}
+        response = self.client.get("/api/internal/events?validation_status=unvalidated&limit=1", headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        event = response.json()[0]
+        self.assertEqual(event["predicted_label"], "BENIGN")
+        self.assertEqual(event["validation_status"], "unvalidated")
+        self.assertEqual(event["validation_reason"], "icmpv6_detection_not_validated")
+        self.assertEqual(event["protocol"], 58)
+        self.assertEqual(event["confidence"], 0.99)
+        older = self.client.get(f"/api/internal/events?validation_status=unvalidated&before_id={event['id']}", headers=headers).json()
+        self.assertEqual(len(older), 1)
+        self.assertEqual(older[0]["predicted_label"], "DOS_DDOS")
+        for query in ("limit=201", "limit=0", "before_id=0", "before_id=99999999999999999999", "validation_status=invalid"):
+            self.assertEqual(self.client.get("/api/internal/events?" + query, headers=headers).status_code, 422)
+
     def test_summary_expires_old_records_when_ingestion_has_stopped(self) -> None:
         self.store.record_predictions(
             "zeek", [PredictionRow(utcnow() - timedelta(days=29), "BOTNET", 0.99)], 20
