@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -124,10 +125,35 @@ def history_count(history: str, letters: str) -> int:
     return sum(history.count(letter) for letter in letters)
 
 
-def protocol_number(proto: Any) -> int:
-    text = str(proto).lower()
+def protocol_number(record: dict[str, Any]) -> int:
+    text = str(record.get("proto")).lower()
     if text not in PROTOCOL_NUMBERS:
         raise ValueError(f"Unsupported Zeek protocol: {text}")
+    # Zeek uses proto="icmp" for both IP families. ip_proto is the actual
+    # IP protocol number, so prefer it over the transport category.
+    value = record.get("ip_proto")
+    if value not in (None, "-", ""):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("Zeek ip_proto must be an integer from 0 to 255.")
+        number = to_int(value)
+        if number > 255:
+            raise ValueError("Zeek ip_proto must be an integer from 0 to 255.")
+        allowed = (1, 58) if text == "icmp" else (PROTOCOL_NUMBERS[text],)
+        if number not in allowed:
+            raise ValueError("Zeek ip_proto disagrees with its transport category.")
+        return number
+    # Older Zeek logs may omit ip_proto. Infer ICMPv6 from the available
+    # endpoints; records without either endpoint retain the legacy fallback.
+    if text == "icmp":
+        versions = {
+            ipaddress.ip_address(record[name]).version
+            for name in ("id.orig_h", "id.resp_h")
+            if record.get(name) not in (None, "-", "")
+        }
+        if len(versions) > 1:
+            raise ValueError("Zeek ICMP endpoints have different IP versions.")
+        if versions == {6}:
+            return 58
     return PROTOCOL_NUMBERS[text]
 
 
@@ -202,7 +228,7 @@ def conn_record_to_flow(record: dict[str, Any]) -> dict[str, Any]:
 
     features = {
         "dst_port": float(to_int(record.get("id.resp_p"))),
-        "protocol": float(protocol_number(record.get("proto"))),
+        "protocol": float(protocol_number(record)),
         "timestamp": float(timestamp_us),
         "flow_duration": float(duration_us),
         "tot_fwd_pkts": float(orig_pkts),

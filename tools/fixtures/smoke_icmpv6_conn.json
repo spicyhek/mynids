@@ -1,0 +1,19 @@
+{
+  "uid": "smoke-icmpv6-connection",
+  "ts": 1710200000.25,
+  "id.orig_h": "fe80::10",
+  "id.orig_p": 135,
+  "id.resp_h": "fe80::1",
+  "id.resp_p": 136,
+  "proto": "icmp",
+  "ip_proto": 58,
+  "duration": 52.73699593544006,
+  "orig_bytes": 48,
+  "resp_bytes": 32,
+  "orig_ip_bytes": 144,
+  "resp_ip_bytes": 128,
+  "orig_pkts": 2,
+  "resp_pkts": 2,
+  "conn_state": "OTH",
+  "missed_bytes": 0
+}
