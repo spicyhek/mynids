@@ -72,6 +72,46 @@ class ZeekToCicidsTests(unittest.TestCase):
         self.assertEqual(flow["features"]["tot_fwd_pkts"], 12.0)
         self.assertEqual(flow["features"]["tot_bwd_pkts"], 8.0)
 
+    def test_icmpv6_ip_protocol_survives_conversion(self):
+        record = json.loads((self.repo_root / "tools/fixtures/smoke_icmpv6_conn.json").read_text())
+        flow = conn_record_to_flow(record)
+        self.assertEqual(flow["features"]["protocol"], 58.0)
+        self.assertEqual(flow["features"]["tot_fwd_pkts"], 2.0)
+        self.assertEqual(flow["features"]["tot_bwd_pkts"], 2.0)
+        self.assertEqual(flow["features"]["src_port"], 135.0)
+        self.assertEqual(flow["features"]["dst_port"], 136.0)
+        self.assertEqual(set(flow["features"]), set(self.feature_order))
+        self.assertEqual(flow["flow_id"], f"{record['uid']}:{flow['event_time']}")
+        self.assertEqual(flow, conn_record_to_flow({k: v for k, v in record.items() if k != "ip_proto"}))
+
+    def test_protocol_mapping_for_current_and_legacy_logs(self):
+        for proto, number in (("tcp", 6), ("udp", 17), ("icmp", 1), ("icmp6", 58)):
+            with self.subTest(proto=proto):
+                record = {**SAMPLE_CONN_RECORD, "proto": proto}
+                expected = conn_record_to_flow(record)
+                self.assertEqual(expected["features"]["protocol"], number)
+                self.assertEqual(expected, conn_record_to_flow({**record, "ip_proto": number}))
+        for missing in (None, "-", ""):
+            with self.subTest(missing=missing):
+                record = {**SAMPLE_CONN_RECORD, "proto": "icmp", "ip_proto": missing,
+                          "id.orig_h": "2001:db8::1", "id.resp_h": "2001:db8::2"}
+                self.assertEqual(conn_record_to_flow(record)["features"]["protocol"], 58)
+                del record["id.orig_h"]
+                self.assertEqual(conn_record_to_flow(record)["features"]["protocol"], 58)
+                del record["id.resp_h"]
+                self.assertEqual(conn_record_to_flow(record)["features"]["protocol"], 1)
+
+    def test_malformed_protocol_metadata_is_rejected(self):
+        for value in (True, "58", -1, 256, 58.5, float("nan"), float("inf"), 1e100):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                conn_record_to_flow({**SAMPLE_CONN_RECORD, "proto": "icmp", "ip_proto": value})
+        for proto, number in (("tcp", 58), ("udp", 6), ("icmp", 17), ("icmp6", 1)):
+            with self.subTest(proto=proto, number=number), self.assertRaisesRegex(ValueError, "disagrees"):
+                conn_record_to_flow({**SAMPLE_CONN_RECORD, "proto": proto, "ip_proto": number})
+        for address in ("not-an-ip", "2001:db8::1"):
+            with self.subTest(address=address), self.assertRaises(ValueError):
+                conn_record_to_flow({**SAMPLE_CONN_RECORD, "proto": "icmp", "id.orig_h": address})
+
     def test_export_log_once_posts_batch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

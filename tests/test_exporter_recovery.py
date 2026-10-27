@@ -65,6 +65,30 @@ class ExporterRecoveryTests(unittest.TestCase):
             send.assert_called_once()
         self.assertEqual(load_state(self.state)["offset"], self.log.stat().st_size)
 
+    def test_protocol_upgrade_preserves_pending_payload_and_corrects_new_flows(self):
+        record = {**SAMPLE_CONN_RECORD, "proto": "icmp", "ip_proto": 58,
+                  "id.orig_h": "fe80::10", "id.resp_h": "fe80::1"}
+        self.log.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        # Simulate an old serialized batch with a lost acknowledgment. Changing
+        # its payload on retry would cause an HTTP 409 after a committed insert.
+        with patch("sensor.zeek_to_cicids.protocol_number", return_value=1), patch(
+                "sensor.zeek_to_cicids.send_payload", side_effect=TimeoutError("lost acknowledgment")):
+            with self.assertRaises(TimeoutError):
+                self.export()
+        pending_path = self.state.with_suffix(".json.pending.json")
+        pending_flows = json.loads(pending_path.read_text())["flows"]
+        self.assertEqual(pending_flows[0]["features"]["protocol"], 1)
+        with self.log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({**record, "uid": "after-upgrade"}) + "\n")
+        with patch("sensor.zeek_to_cicids.send_payload", side_effect=acknowledge) as send:
+            self.assertEqual(self.export(), 2)
+            self.assertEqual(self.export(), 0)
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(send.call_args_list[0].args[3], pending_flows)
+        self.assertEqual(send.call_args_list[1].args[3][0]["features"]["protocol"], 58)
+        self.assertFalse(pending_path.exists())
+        self.assertEqual(load_state(self.state)["offset"], self.log.stat().st_size)
+
     def test_rotation_drains_old_file_before_new_file_even_if_new_file_is_larger(self):
         with patch("sensor.zeek_to_cicids.send_payload", side_effect=acknowledge) as send:
             self.export()
