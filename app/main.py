@@ -43,7 +43,7 @@ async def lifespan(_: FastAPI):
     store = StatsStore(settings.db_path, labels=labels)
     try:
         store.initialize()
-        store.purge_old_events(settings.retention_hours)
+        store.purge_old_events(settings.retention_hours, max_batches=1)
         app.state.store = store
         stop = asyncio.Event()
 
@@ -53,7 +53,7 @@ async def lifespan(_: FastAPI):
                     await asyncio.wait_for(stop.wait(), timeout=60)
                 except TimeoutError:
                     try:
-                        await asyncio.to_thread(store.purge_old_events, settings.retention_hours)
+                        await asyncio.to_thread(store.purge_old_events, settings.retention_hours, 1)
                     except Exception:
                         logger.exception("Retention maintenance failed")
         maintenance = asyncio.create_task(maintain())
@@ -135,7 +135,6 @@ def public_summary(
     store: StatsStore = Depends(get_store),
 ) -> SummaryResponse:
     response.headers["Cache-Control"] = "no-store"
-    store.purge_old_events(settings.retention_hours)
     summary = store.build_summary(settings.public_window_minutes, hours, settings.stale_after_seconds)
     warnings = get_warnings()
     if any(sensor["stale"] for sensor in summary["sensors"]):

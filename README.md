@@ -65,9 +65,13 @@ Pending batch files must not be deleted to bypass a delivery error.
   without independent sensor heartbeats. The dashboard's activity badge uses
   observation time so an old replay does not look like current traffic.
 
-Summary queries share one SQLite read snapshot. Retention runs at startup,
-periodically, and before summaries. The dashboard validates a complete summary
-before updating its counters and aborts stalled requests after ten seconds.
+Summary queries share one SQLite read snapshot. Retained totals are updated
+transactionally on insertion and deletion; existing databases are backfilled once
+on upgrade. Retention runs at startup and periodically, outside the public request
+path. Each maintenance pass deletes at most 1,000 expired rows, so retained
+totals can temporarily include rows awaiting cleanup. The dashboard validates
+a complete summary before updating its counters and aborts stalled requests
+after ten seconds.
 
 ## Upgrading an existing installation
 

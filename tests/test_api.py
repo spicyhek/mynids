@@ -92,11 +92,16 @@ class SummaryApiTests(unittest.TestCase):
         self.store.record_predictions(
             "zeek", [PredictionRow(utcnow() - timedelta(days=29), "BOTNET", 0.99)], 20
         )
+        self.store.purge_old_events(main.settings.retention_hours)
         data = self.client.get("/api/public/summary").json()
         self.assertEqual(data["total_events"], 0)
         self.assertEqual(data["all_time_counts"]["BOTNET"], 0)
         self.assertEqual(data["lifetime_flows"], 1)
         self.assertEqual(data["lifetime_packets"], 20)
+
+    def test_public_summary_does_not_run_retention_cleanup(self) -> None:
+        with patch.object(self.store, "purge_old_events", side_effect=AssertionError("cleanup in request")):
+            self.assertEqual(self.client.get("/api/public/summary").status_code, 200)
 
     def test_ingestion_counts_classified_rows_and_rejects_failed_classification(self) -> None:
         payload = {"source": "zeek", "flows": [{"flow_id": "test-flow", "event_time": utcnow().isoformat(),
