@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 
 from app import main
 from app.schemas import FlowRecord
+from app.storage import UNVALIDATED
 from sensor.zeek_to_cicids import conn_record_to_flow, export_log_once
 from tools.evaluate_replay import evaluate
 
@@ -112,9 +113,10 @@ def runtime_checks(classifier):
     fixture = json.loads((Path(__file__).parent / "fixtures/smoke_conn.json").read_text())
     # Runtime scenarios are synthetic and deliberately have no assigned truth labels.
     records = []
-    for protocol in ("tcp", "udp", "icmp"):
+    for protocol, ip_proto in (("tcp", 6), ("udp", 17), ("icmp", 1), ("icmp6", 58)):
         for packets, duration in ((1, 0.0), (20, 1.5), (100000, 0.1)):
-            row = dict(fixture, uid=f"verify-{protocol}-{packets}", proto=protocol,
+            row = dict(fixture, uid=f"verify-{protocol}-{packets}",
+                       proto="icmp" if protocol == "icmp6" else protocol, ip_proto=ip_proto,
                        ts=datetime.now(UTC).timestamp() - 60, duration=duration,
                        orig_pkts=packets, resp_pkts=0, orig_bytes=0,
                        orig_ip_bytes=packets * 40, resp_bytes=0, resp_ip_bytes=0,
@@ -158,8 +160,8 @@ def runtime_checks(classifier):
                         batch_size=100)
                     require(count == len(records), "Exporter did not acknowledge every flow")
             summary = client.get("/api/public/summary").json()
-            expected_counts = dict.fromkeys(classifier.labels, 0)
-            expected_counts.update(Counter(row.predicted_label for row in predictions))
+            expected_counts = dict.fromkeys([*classifier.labels, UNVALIDATED], 0)
+            expected_counts.update(Counter(row.summary_label for row in predictions))
             require(acknowledgments[0]["inserted"] == len(records), "Initial insertion mismatch")
             require(acknowledgments[1]["inserted"] == 0
                     and acknowledgments[1]["duplicates"] == len(records), "Replay was not deduplicated")
@@ -167,6 +169,14 @@ def runtime_checks(classifier):
             require(summary["lifetime_packets"] == sum(r["orig_pkts"] for r in records),
                     "Stored packet count mismatch")
             require(summary["retained_counts"] == expected_counts, "Stored predictions mismatch")
+            require(summary["retained_counts"][UNVALIDATED] == 3, "ICMPv6 status count mismatch")
+            response = client.get("/api/internal/events?validation_status=unvalidated",
+                                  headers={"X-Ingest-Token": token})
+            response.raise_for_status()
+            require(len(response.json()) == 3 and all(
+                row["protocol"] == 58 and row["validation_status"] == "unvalidated"
+                and row["predicted_label"] in classifier.labels for row in response.json()),
+                "Private event history lost raw ICMPv6 predictions")
     return {"status": "passed", "synthetic_flows": len(flows), "batch_seconds": batch_seconds,
             "prediction_counts": expected_counts, "summary": summary,
             "scope": "In-process exporter/API/real model/temporary SQLite; no live Zeek, network transport or browser."}

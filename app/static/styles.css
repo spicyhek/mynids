@@ -11,6 +11,7 @@
   --botnet: #ff7aa7;
   --dos: #ffd166;
   --other: #b794f4;
+  --unvalidated: #a4b5cc;
 }
 
 *,
@@ -317,7 +318,7 @@ body::after {
 
 .cards-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 0.75rem;
 }
 
@@ -328,7 +329,7 @@ body::after {
 
 .class-guide {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 0.75rem;
   margin-top: 0.75rem;
 }
@@ -344,6 +345,13 @@ body::after {
   color: var(--text-main);
   font-size: 0.56rem;
   line-height: 1.7;
+}
+
+.coverage-note {
+  color: var(--text-muted);
+  font-size: 0.56rem;
+  line-height: 1.85;
+  margin: 0.85rem 0;
 }
 
 .stat-value {
@@ -433,6 +441,11 @@ body::after {
   color: var(--other);
 }
 
+.pill.is-unvalidated,
+.is-unvalidated {
+  color: var(--unvalidated);
+}
+
 .warning-item,
 .empty-state {
   color: var(--text-muted);
@@ -509,6 +522,10 @@ body::after {
 
 .chart-segment.is-other {
   background: linear-gradient(90deg, #9f75f1, var(--other));
+}
+
+.chart-segment.is-unvalidated {
+  background: repeating-linear-gradient(135deg, #64748b 0 5px, var(--unvalidated) 5px 10px);
 }
 
 .chart-row.is-empty .chart-track {

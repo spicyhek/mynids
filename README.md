@@ -11,8 +11,18 @@ The service has two surfaces:
   - `GET /readyz` (returns 503 when ingestion is not ready)
 - Private:
   - `POST /api/internal/flows`
+  - `GET /api/internal/events` (requires `X-Ingest-Token`)
 
 The site intentionally exposes only aggregate statistics.
+
+## ICMPv6 validation status
+
+New flows with model feature `protocol: 58` are recorded as `unvalidated`, with
+reason `icmpv6_detection_not_validated`. Their raw model label and score are
+preserved. The operational `UNVALIDATED` category is separate from the four model
+classes: it is not a benign verdict, an attack verdict, or a fifth trained class.
+Other protocols retain status `classified`, which describes a model prediction,
+not an independently confirmed incident or an accuracy guarantee.
 
 ## Ingestion contract and delivery guarantees
 

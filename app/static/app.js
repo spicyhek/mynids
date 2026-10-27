@@ -12,9 +12,11 @@ const LABEL_META = [
   { key: "BOTNET", target: "recent-botnet", className: "is-botnet" },
   { key: "DOS_DDOS", target: "recent-dos", className: "is-dos" },
   { key: "OTHER_ATTACK", target: "recent-other", className: "is-other" },
+  { key: "UNVALIDATED", target: "recent-unvalidated", className: "is-unvalidated" },
 ];
 
 function formatLabelName(value) {
+  if (value === "UNVALIDATED") return "unvalidated ICMPv6";
   return String(value || "")
     .replace(/_/g, " / ")
     .toLowerCase();

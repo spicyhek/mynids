@@ -12,6 +12,8 @@ from app.debug_log import agent_log
 
 
 SQLITE_DT_FORMAT = "%Y-%m-%d %H:%M:%S"
+UNVALIDATED = "UNVALIDATED"
+ICMPV6_REASON = "icmpv6_detection_not_validated"
 
 
 def utcnow() -> datetime:
@@ -38,6 +40,19 @@ class PredictionRow:
     flow_id: str | None = None
     packet_count: int | None = None
     payload_hash: str | None = None
+    protocol: int | None = None
+
+    @property
+    def validation_status(self) -> str:
+        return "unvalidated" if self.protocol == 58 else "classified"
+
+    @property
+    def validation_reason(self) -> str | None:
+        return ICMPV6_REASON if self.protocol == 58 else None
+
+    @property
+    def summary_label(self) -> str:
+        return UNVALIDATED if self.validation_status == "unvalidated" else self.predicted_label
 
 
 class FlowConflict(ValueError):
@@ -48,6 +63,7 @@ class StatsStore:
     def __init__(self, db_path: Path, labels: list[str]) -> None:
         self._db_path = db_path
         self._labels = labels
+        self._summary_labels = [*labels, UNVALIDATED]
         self._lock = threading.Lock()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         # region agent log
@@ -117,6 +133,18 @@ class StatsStore:
                 self._connection.execute("ALTER TABLE classified_events ADD COLUMN packet_count INTEGER")
             if "flow_id" not in columns:
                 self._connection.execute("ALTER TABLE classified_events ADD COLUMN flow_id TEXT")
+            if "protocol" not in columns:
+                self._connection.execute("ALTER TABLE classified_events ADD COLUMN protocol INTEGER")
+            if "validation_status" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE classified_events ADD COLUMN validation_status TEXT NOT NULL DEFAULT 'legacy'"
+                )
+            if "validation_reason" not in columns:
+                self._connection.execute("ALTER TABLE classified_events ADD COLUMN validation_reason TEXT")
+            self._connection.execute(
+                """CREATE INDEX IF NOT EXISTS idx_classified_events_unvalidated
+                   ON classified_events(id) WHERE validation_status = 'unvalidated'"""
+            )
             # This app inserts one AUTOINCREMENT row per classified flow. The
             # sequence survives retention deletes and includes flows recorded
             # before lifetime counters were introduced.
@@ -171,6 +199,8 @@ class StatsStore:
                 raise ValueError("Identified flows require a fingerprint and packet count.")
             if row.packet_count is not None and (type(row.packet_count) is not int or not 0 <= row.packet_count <= 2**53 - 1):
                 raise ValueError("Packet count must be a nonnegative safe integer.")
+            if row.protocol is not None and (type(row.protocol) is not int or not 0 <= row.protocol <= 255):
+                raise ValueError("Protocol must be an integer from 0 to 255.")
         if type(lifetime_packet_total) is not int or lifetime_packet_total < 0:
             raise ValueError("Packet total must be a nonnegative integer.")
         if any(row.packet_count is not None for row in rows) and any(row.packet_count is None for row in rows):
@@ -194,12 +224,14 @@ class StatsStore:
                     )
                 self._connection.execute(
                     """INSERT INTO classified_events
-                    (source, observed_at, predicted_label, confidence, created_at, flow_id, packet_count)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (source, observed_at, predicted_label, confidence, created_at, flow_id, packet_count,
+                     protocol, validation_status, validation_reason)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (source, to_sqlite_dt(row.observed_at), row.predicted_label, row.confidence,
-                     created_at, row.flow_id, row.packet_count),
+                     created_at, row.flow_id, row.packet_count, row.protocol,
+                     row.validation_status, row.validation_reason),
                 )
-                counts[row.predicted_label] += 1
+                counts[row.summary_label] += 1
                 packets += row.packet_count or 0
             self._connection.execute(
                 """
@@ -251,8 +283,8 @@ class StatsStore:
         history_cutoff = to_sqlite_dt(now - timedelta(hours=history_hours))
         upper_bound = to_sqlite_dt(now)
 
-        all_time_counts = {label: 0 for label in self._labels}
-        recent_counts = {label: 0 for label in self._labels}
+        all_time_counts = {label: 0 for label in self._summary_labels}
+        recent_counts = {label: 0 for label in self._summary_labels}
         hourly: dict[datetime, dict[str, int]] = {}
         sources: list[dict[str, int | str]] = []
         lifetime_flows = 0
@@ -290,35 +322,38 @@ class StatsStore:
 
             for row in self._connection.execute(
                 """
-                SELECT predicted_label, COUNT(*) AS total
+                SELECT CASE WHEN validation_status = 'unvalidated' THEN 'UNVALIDATED'
+                       ELSE predicted_label END AS classification, COUNT(*) AS total
                 FROM classified_events
-                GROUP BY predicted_label
+                GROUP BY classification
                 """
             ):
-                label = str(row["predicted_label"])
+                label = str(row["classification"])
                 all_time_counts[label] = int(row["total"])
 
             for row in self._connection.execute(
                 """
-                SELECT predicted_label, COUNT(*) AS total
+                SELECT CASE WHEN validation_status = 'unvalidated' THEN 'UNVALIDATED'
+                       ELSE predicted_label END AS classification, COUNT(*) AS total
                 FROM classified_events
                 WHERE observed_at >= ? AND observed_at <= ?
-                GROUP BY predicted_label
+                GROUP BY classification
                 """,
                 (recent_cutoff, upper_bound),
             ):
-                label = str(row["predicted_label"])
+                label = str(row["classification"])
                 recent_counts[label] = int(row["total"])
 
             for row in self._connection.execute(
                 """
                 SELECT
                     strftime('%Y-%m-%d %H:00:00', observed_at) AS bucket_start,
-                    predicted_label,
+                    CASE WHEN validation_status = 'unvalidated' THEN 'UNVALIDATED'
+                         ELSE predicted_label END AS classification,
                     COUNT(*) AS total
                 FROM classified_events
                 WHERE observed_at >= ? AND observed_at <= ?
-                GROUP BY bucket_start, predicted_label
+                GROUP BY bucket_start, classification
                 ORDER BY bucket_start ASC
                 """,
                 (history_cutoff, upper_bound),
@@ -326,8 +361,8 @@ class StatsStore:
                 bucket = from_sqlite_dt(str(row["bucket_start"]))
                 if bucket is None:
                     continue
-                counts = hourly.setdefault(bucket, {label: 0 for label in self._labels})
-                label = str(row["predicted_label"])
+                counts = hourly.setdefault(bucket, {label: 0 for label in self._summary_labels})
+                label = str(row["classification"])
                 counts[label] = int(row["total"])
 
             for row in self._connection.execute(
@@ -345,7 +380,7 @@ class StatsStore:
 
         bucket = (now - timedelta(hours=history_hours)).replace(minute=0, second=0)
         while bucket <= now:
-            hourly.setdefault(bucket, dict.fromkeys(self._labels, 0))
+            hourly.setdefault(bucket, dict.fromkeys(self._summary_labels, 0))
             bucket += timedelta(hours=1)
         bucket_rows = [
             {"bucket_start": bucket, "counts": counts}
@@ -379,3 +414,28 @@ class StatsStore:
                 for row in sensor_rows
             ],
         }
+
+    def list_events(self, *, limit: int = 100, before_id: int | None = None,
+                    validation_status: str | None = None) -> list[dict]:
+        if not 1 <= limit <= 200:
+            raise ValueError("Event limit must be between 1 and 200.")
+        clauses = []
+        params = []
+        if before_id is not None:
+            clauses.append("id < ?")
+            params.append(before_id)
+        if validation_status is not None:
+            if validation_status not in ("legacy", "classified", "unvalidated"):
+                raise ValueError("Unknown validation status.")
+            clauses.append("validation_status = ?")
+            params.append(validation_status)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        with self._lock:
+            rows = self._connection.execute(
+                f"""SELECT id, source, flow_id, observed_at, created_at, predicted_label,
+                    confidence, packet_count, protocol, validation_status, validation_reason
+                    FROM classified_events {where} ORDER BY id DESC LIMIT ?""",
+                [*params, limit],
+            ).fetchall()
+        return [{**dict(row), "observed_at": from_sqlite_dt(row["observed_at"]),
+                 "created_at": from_sqlite_dt(row["created_at"])} for row in rows]

@@ -31,6 +31,25 @@ class InferenceValidationTests(unittest.TestCase):
         self.assertEqual(row.predicted_label, "BENIGN")
         self.assertEqual(row.confidence, 0.8)
 
+    def test_icmpv6_status_preserves_raw_predictions_for_every_class(self):
+        for index, label in enumerate(("BENIGN", "ATTACK")):
+            with self.subTest(label=label):
+                classifier = self.classifier()
+                classifier._feature_order.append("protocol")
+                scores = np.zeros((1, 2))
+                scores[0, index] = 1.0
+                classifier._model.predict.return_value = scores
+                for protocol in (58, 1, 6, 17):
+                    flow = self.flow()
+                    flow["features"]["protocol"] = protocol
+                    row = classifier.classify_batch([flow])[0]
+                    self.assertEqual(row.predicted_label, label)
+                    self.assertEqual(row.confidence, 1.0)
+                    self.assertEqual(row.protocol, protocol)
+                    self.assertEqual(row.validation_status, "unvalidated" if protocol == 58 else "classified")
+                    self.assertEqual(row.summary_label, "UNVALIDATED" if protocol == 58 else label)
+                    self.assertEqual(row.validation_reason, "icmpv6_detection_not_validated" if protocol == 58 else None)
+
     def test_timestamp_is_zero_before_scaling_without_mutating_payload(self):
         classifier = self.classifier()
         classifier._feature_order.insert(1, "timestamp")

@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from app.storage import FlowConflict, PredictionRow, StatsStore, utcnow
 
@@ -189,11 +190,38 @@ class LifetimeFlowTests(unittest.TestCase):
         self.assertEqual(summary["lifetime_flows"], 1)
         self.assertFalse(summary["packet_counts_complete"])
         self.assertIn("legacy", summary["counter_provenance"])
+        event = store.list_events()[0]
+        self.assertEqual(event["validation_status"], "legacy")
+        self.assertIsNone(event["protocol"])
+        self.assertEqual(summary["retained_counts"]["UNVALIDATED"], 0)
+        self.assertEqual(summary["retained_counts"]["BENIGN"], 1)
         self.assertLess(summary["last_observed_at"], summary["last_processed_at"])
         store.purge_old_events(24)
         summary = self.summary(store)
         self.assertEqual(summary["lifetime_flows"], 1)
         self.assertIsNotNone(summary["last_processed_at"])
+
+    def test_unvalidated_status_survives_restart_and_keeps_raw_prediction(self):
+        store = self.open_store()
+        row = PredictionRow(utcnow(), "DOS_DDOS", 0.999, "icmpv6-uid", 4, "hash", 58)
+        self.assertEqual(dict(store.record_predictions("sensor", [row])), {"UNVALIDATED": 1})
+        store.close()
+        reopened = self.open_store()
+        summary = self.summary(reopened)
+        self.assertEqual(summary["retained_counts"]["UNVALIDATED"], 1)
+        self.assertEqual(summary["retained_counts"]["DOS_DDOS"], 0)
+        self.assertEqual(summary["lifetime_flows"], 1)
+        self.assertEqual(summary["lifetime_packets"], 4)
+        self.assertEqual(dict(reopened.record_predictions("sensor", [row])), {})
+        event = reopened.list_events(validation_status="unvalidated")[0]
+        self.assertEqual(event["predicted_label"], "DOS_DDOS")
+        self.assertEqual(event["confidence"], 0.999)
+        self.assertEqual(event["protocol"], 58)
+        with patch("app.storage.utcnow", return_value=utcnow() + timedelta(hours=2)):
+            self.assertEqual(reopened.purge_old_events(1), 1)
+        self.assertEqual(reopened.list_events(validation_status="unvalidated"), [])
+        self.assertEqual(self.summary(reopened)["lifetime_flows"], 1)
+        self.assertEqual(dict(reopened.record_predictions("sensor", [row])), {})
 
 
 if __name__ == "__main__":

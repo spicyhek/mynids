@@ -170,6 +170,7 @@ class FlowClassifier:
                     observed_at=observed_at,
                     predicted_label=self._labels[label_index],
                     confidence=float(probabilities[index][label_index]),
+                    protocol=int(flow["features"]["protocol"]) if "protocol" in flow["features"] else None,
                 )
             )
         return rows
