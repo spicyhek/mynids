@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "name": "example-reviewed-captures-five-class",
+  "label_map": {
+    "path": "labels.five-class.json",
+    "sha256": "1a7f7abfbc4a93073b7fd1c857124384d5d89bb20188d633615018d6b12a315e"
+  },
+  "sources": [
+    {
+      "path": "../data/labels/session-001.reviewed.jsonl",
+      "sha256": "REPLACE_WITH_REVIEWED_INPUT_SHA256",
+      "provenance_path": "../data/labels/session-001.provenance.jsonl",
+      "provenance_sha256": "REPLACE_WITH_LABEL_EVIDENCE_SHA256",
+      "label_basis": "Operator workload evidence matched to connection metadata; no model-derived labels.",
+      "origin": "homelab",
+      "group": "session-001",
+      "split": "regression"
+    }
+  ]
+}

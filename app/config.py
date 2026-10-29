@@ -12,6 +12,11 @@ def _path_env(name: str, default: str | Path) -> Path:
     return Path(os.getenv(name, str(default))).expanduser().resolve()
 
 
+def _optional_path_env(name: str) -> Path | None:
+    value = os.getenv(name, "").strip()
+    return Path(value).expanduser().resolve() if value else None
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str = "NIDS Service"
@@ -30,6 +35,9 @@ class Settings:
     max_history_hours: int = int(os.getenv("NIDS_MAX_HISTORY_HOURS", "168"))
     retention_hours: int = int(os.getenv("NIDS_RETENTION_HOURS", "720"))
     default_source_name: str = os.getenv("NIDS_DEFAULT_SOURCE_NAME", "homelab-flow-bridge")
+    # Optional shadow model (zeek-conn-window-v2); its pickle loads only if the SHA-256 matches.
+    shadow_model_dir: Path | None = _optional_path_env("NIDS_SHADOW_MODEL_DIR")
+    shadow_model_sha256: str = os.getenv("NIDS_SHADOW_MODEL_SHA256", "")
 
     def __post_init__(self) -> None:
         for name in ("public_window_minutes", "stale_after_seconds", "max_history_hours", "retention_hours"):

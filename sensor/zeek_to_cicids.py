@@ -75,7 +75,42 @@ def parse_args() -> argparse.Namespace:
         default=5.0,
         help="Polling interval when no new Zeek records are available.",
     )
+    parser.add_argument(
+        "--features-v2", action="store_true",
+        default=os.getenv("NIDS_EXPORT_FEATURES_V2", "").lower() in ("1", "true", "yes"),
+        help="Also send zeek-conn-window-v2 features for shadow evaluation (upgrade the server first).",
+    )
     return parser.parse_args()
+
+
+class FeatureV2Stream:
+    """Feed each conn.log line to the v2 window state at most once, in log-write order.
+
+    Lines re-read after a failed export were already counted, so they are sent without
+    features_v2 rather than counted twice.
+    """
+
+    def __init__(self) -> None:
+        from sensor.zeek_features_v2 import CONTRACT_ID, Extractor  # Avoids a circular import.
+
+        self.contract = CONTRACT_ID
+        self.extractor = Extractor()
+        self.identity: str | None = None
+        self.offset = 0
+
+    def reset(self, identity: str) -> None:
+        self.identity, self.offset = identity, 0
+
+    def process(self, identity: str, end_offset: int, record: dict[str, Any]) -> dict[str, Any] | None:
+        if identity != self.identity:
+            self.reset(identity)
+        if end_offset <= self.offset:
+            return None
+        self.offset = end_offset
+        try:
+            return self.extractor.process(record)
+        except (ValueError, KeyError, TypeError, OverflowError):
+            return None  # v2 rejected the record before touching window state; v1 is unaffected.
 
 
 def parse_zeek_json_line(line: str) -> dict[str, Any] | None:
@@ -351,8 +386,20 @@ def save_state(state_file: Path, offset: int, **metadata: Any) -> None:
     atomic_json(state_file, {"offset": offset, **metadata})
 
 
+V2_FIELDS = ("features_v2", "window_warm", "window_degraded")
+
+
+def without_v2(flows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{key: value for key, value in flow.items() if key not in V2_FIELDS} for flow in flows]
+
+
 def send_payload(endpoint: str, token: str, source_name: str, flows: list[dict[str, Any]]) -> dict[str, Any]:
-    body = json.dumps({"source": source_name, "flows": flows}, allow_nan=False).encode("utf-8")
+    payload: dict[str, Any] = {"source": source_name, "flows": flows}
+    if any("features_v2" in flow for flow in flows):
+        from sensor.zeek_features_v2 import CONTRACT_ID
+
+        payload["features_v2_contract"] = CONTRACT_ID
+    body = json.dumps(payload, allow_nan=False).encode("utf-8")
     req = request.Request(endpoint, data=body, headers={
         "Content-Type": "application/json", "X-Ingest-Token": token,
     }, method="POST")
@@ -398,6 +445,10 @@ def deliver(endpoint: str, token: str, source: str, flows: list[dict], state_fil
     except error.HTTPError as exc:
         if exc.code not in (409, 413, 422):
             raise
+        if exc.code == 422 and any("features_v2" in flow for flow in flows):
+            # A server without shadow support rejects the extra fields; never lose v1 flows for them.
+            print("Ingest rejected features_v2; resending this batch without them.", file=sys.stderr, flush=True)
+            return deliver(endpoint, token, source, without_v2(flows), state_file)
         if len(flows) > 1:
             middle = len(flows) // 2
             return (deliver(endpoint, token, source, flows[:middle], state_file)
@@ -423,7 +474,8 @@ def anchor(handle: Any, offset: int) -> str:
 
 
 def export_log_once(*, log_path: Path, endpoint: str, state_file: Path,
-                    source_name: str, token: str, batch_size: int) -> int:
+                    source_name: str, token: str, batch_size: int,
+                    features_v2: FeatureV2Stream | None = None) -> int:
     if not 1 <= batch_size <= MAX_BATCH_SIZE:
         raise ValueError(f"batch_size must be between 1 and {MAX_BATCH_SIZE}")
     spool = state_file.with_suffix(state_file.suffix + ".pending.json")
@@ -465,6 +517,8 @@ def export_log_once(*, log_path: Path, endpoint: str, state_file: Path,
         # A checkpoint anchor also detects copy-truncate followed by rapid regrowth.
         if opened.st_size < offset or (state.get("anchor") and anchor(handle, offset) != state["anchor"]):
             offset = 0
+            if features_v2 is not None:
+                features_v2.reset(identity)  # Truncated and regrown: these are new lines.
         handle.seek(offset)
         flows: list[dict] = []
 
@@ -499,7 +553,13 @@ def export_log_once(*, log_path: Path, endpoint: str, state_file: Path,
             try:
                 parsed = parse_zeek_json_line(line.decode("utf-8"))
                 if parsed is not None:
-                    flows.append(conn_record_to_flow(parsed))
+                    # v2 sees every valid record first, as offline preparation does, even one v1 rejects.
+                    v2 = features_v2.process(identity, offset, parsed) if features_v2 is not None else None
+                    flow = conn_record_to_flow(parsed)
+                    if v2 is not None:
+                        flow.update(features_v2=v2["features"], window_warm=v2["window_warm"],
+                                    window_degraded=v2["window_degraded"])
+                    flows.append(flow)
             except (ValueError, OverflowError, OSError) as exc:
                 quarantine(state_file, str(exc), line)
             if len(flows) >= batch_size:
@@ -519,11 +579,12 @@ def main() -> int:
         print("Token, stable source identity, positive poll interval and batch size 1..1000 are required.", file=sys.stderr)
         return 2
     failures = 0
+    stream = FeatureV2Stream() if args.features_v2 else None
     while True:
         try:
             exported = export_log_once(
                 log_path=Path(args.log_path), endpoint=args.endpoint, state_file=Path(args.state_file),
-                source_name=source_name, token=args.token, batch_size=args.batch_size,
+                source_name=source_name, token=args.token, batch_size=args.batch_size, features_v2=stream,
             )
             failures = 0
             if exported:

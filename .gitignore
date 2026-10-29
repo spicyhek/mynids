@@ -70,6 +70,14 @@ instance/
 # Local runtime data
 data/
 
+# Private captures and operational conversation notes, including files outside data/.
+*.pcap
+*.pcap[0-9]*
+*.pcapng
+*.sqlite3
+*.sqlite3-*
+/CONVERSATION_CONTEXT.md
+
 # Scrapy stuff:
 .scrapy
 

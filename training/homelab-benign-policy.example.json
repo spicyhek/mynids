@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "label_tier": "allowlist-benign",
+  "documentation": "Example only: addresses use RFC 5737/3849 documentation ranges. Copy to ignored data/ and replace them; real policies contain private network details.",
+  "session": {
+    "session_id": "20261029T214142Z-example",
+    "manifest_sha256": "replace-with-sha256-of-session-manifest.json",
+    "attestation": "No deliberate attack, scan, load test or brute-force traffic was generated during this capture."
+  },
+  "networks": {
+    "lan": ["192.0.2.0/24"],
+    "cluster_nodes": ["192.0.2.10/32", "192.0.2.11/32", "192.0.2.12/32"],
+    "pods": ["198.51.100.0/24"],
+    "gateway": ["192.0.2.1/32"],
+    "link_local": ["169.254.0.0/16", "fe80::/10"],
+    "multicast": ["224.0.0.0/4", "ff00::/8"],
+    "lan_broadcast": ["192.0.2.255/32", "255.255.255.255/32"]
+  },
+  "exclusions": {
+    "activities": [],
+    "windows": [],
+    "pad_seconds": 5,
+    "max_distinct_destination_ports_per_minute": 50,
+    "max_distinct_destination_hosts_per_minute": 100
+  },
+  "rules": [
+    {
+      "name": "dns-to-gateway",
+      "rationale": "Hosts resolve names through the LAN gateway.",
+      "proto": ["udp", "tcp"], "orig_hosts": ["lan"], "resp_hosts": ["gateway"], "resp_ports": [53],
+      "conn_states": ["SF", "SHR", "S0"]
+    },
+    {
+      "name": "tls-known-services",
+      "rationale": "Outbound TLS whose SNI is a service the operator uses (Git hosting, own sites).",
+      "proto": ["tcp"], "orig_hosts": ["lan"], "resp_ports": [443],
+      "tls_server_names": ["github.com", ".github.com", ".githubusercontent.com", "example.com", ".example.com"]
+    },
+    {
+      "name": "tailscale-connectivity-check",
+      "rationale": "tailscaled probes /generate_204 over plain HTTP; responses are 204.",
+      "proto": ["tcp"], "orig_hosts": ["lan"], "resp_ports": [80],
+      "http": {"uri_prefix": "/generate_204", "status_codes": [204], "user_agent_prefix": "Go-http-client/"}
+    },
+    {
+      "name": "kubernetes-api-from-nodes",
+      "rationale": "Cluster nodes talk to the control-plane API server.",
+      "proto": ["tcp"], "orig_hosts": ["cluster_nodes", "pods"], "resp_hosts": ["cluster_nodes"], "resp_ports": [6443, 10250]
+    },
+    {
+      "name": "local-discovery-multicast",
+      "rationale": "mDNS, LLMNR and SSDP announcements stay on the local segment and are one-way by design.",
+      "proto": ["udp"], "resp_hosts": ["multicast"], "resp_ports": [5353, 5355, 1900],
+      "conn_states": ["S0", "SF"]
+    },
+    {
+      "name": "ipv6-neighbor-discovery",
+      "rationale": "ICMPv6 router/neighbor solicitation and advertisement (Zeek ports carry ICMP types).",
+      "proto": ["icmp"], "orig_ports": [133, 134, 135, 136], "conn_states": ["OTH"]
+    }
+  ]
+}
