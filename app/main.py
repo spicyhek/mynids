@@ -21,6 +21,7 @@ from app.config import settings
 from app.inference import FlowClassifier
 from app.limits import IngestBodyLimit
 from app.schemas import EventResponse, FlowBatchRequest, HealthResponse, IngestResponse, SummaryResponse
+from app.shadow import ShadowClassifier
 from app.storage import FlowConflict, StatsStore, UNVALIDATED
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,8 @@ classifier = FlowClassifier(
     feature_order_path=settings.feature_order_path, label_map_path=settings.label_map_path,
     label_encoder_path=settings.label_encoder_path,
 )
+shadow: ShadowClassifier | None = (ShadowClassifier(settings.shadow_model_dir, settings.shadow_model_sha256)
+                                   if settings.shadow_model_dir else None)
 DEFAULT_LABELS = ["BENIGN", "BOTNET", "DOS_DDOS", "OTHER_ATTACK"]
 
 
@@ -40,6 +43,12 @@ async def lifespan(_: FastAPI):
     except RuntimeError:
         logger.exception("Model initialization failed")
         labels = classifier.labels or DEFAULT_LABELS
+    if shadow is not None:
+        try:
+            shadow.load()
+        except RuntimeError:
+            # Shadow evaluation is optional; operational inference continues without it.
+            logger.exception("Shadow model initialization failed")
     store = StatsStore(settings.db_path, labels=labels)
     try:
         store.initialize()
@@ -107,10 +116,14 @@ def serve_index() -> FileResponse:
 
 @app.get("/healthz", response_model=HealthResponse)
 def healthz() -> HealthResponse:
+    warnings = get_warnings()
+    if shadow is not None and (not shadow.loaded or shadow.load_error):
+        # Reported, but never degrades status: the shadow model is not part of operational output.
+        warnings.append("Shadow model is configured but unavailable.")
     return HealthResponse(
         status="ok" if classifier.loaded and not classifier.load_error else "degraded",
         generated_at=datetime.now(UTC), model_loaded=classifier.loaded,
-        ingest_enabled=bool(settings.ingest_token), warnings=get_warnings(),
+        ingest_enabled=bool(settings.ingest_token), warnings=warnings,
     )
 
 
@@ -153,8 +166,9 @@ def public_summary(
 
 @app.post("/api/internal/flows", response_model=IngestResponse, dependencies=[Depends(require_ingest_token)])
 def ingest_flows(payload: FlowBatchRequest, store: StatsStore = Depends(get_store)) -> IngestResponse:
+    flows = [flow.model_dump() for flow in payload.flows]
     try:
-        rows = classifier.classify_batch([flow.model_dump() for flow in payload.flows])
+        rows = classifier.classify_batch(flows)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except RuntimeError as exc:
@@ -180,6 +194,8 @@ def ingest_flows(payload: FlowBatchRequest, store: StatsStore = Depends(get_stor
     except (ValueError, OverflowError) as exc:
         logger.exception("Prediction storage validation failed")
         raise HTTPException(503, "Prediction validation failed; no flows were stored.") from exc
+    if shadow is not None:
+        _record_shadow(payload, flows, identified_rows, store)
     # Maintenance must not turn a committed batch into an unsuccessful acknowledgment.
     inserted = sum(counts.values())
     return IngestResponse(
@@ -187,6 +203,18 @@ def ingest_flows(payload: FlowBatchRequest, store: StatsStore = Depends(get_stor
         duplicates=len(rows) - inserted, flow_ids=[flow.flow_id for flow in payload.flows],
         labels=_ordered_counts(counts), generated_at=datetime.now(UTC),
     )
+
+
+def _record_shadow(payload: FlowBatchRequest, flows: list[dict], rows: list, store: StatsStore) -> None:
+    """Best effort after the operational batch commits; a shadow failure never fails ingestion."""
+    try:
+        predictions = shadow.classify(payload.features_v2_contract, flows)
+        if predictions:
+            by_id = {row.flow_id: row for row in rows}
+            store.record_shadow_predictions(payload.source, shadow.model_id, [
+                (by_id[p.flow_id].observed_at, by_id[p.flow_id].summary_label, p) for p in predictions])
+    except Exception:
+        logger.warning("Shadow evaluation skipped for a batch from %s", payload.source, exc_info=True)
 
 
 def _ordered_counts(counts: Counter[str]) -> dict[str, int]:
@@ -207,3 +235,16 @@ def internal_events(
     response.headers["Cache-Control"] = "no-store"
     store.purge_old_events(settings.retention_hours)
     return store.list_events(limit=limit, before_id=before_id, validation_status=validation_status)
+
+
+@app.get("/api/internal/shadow/summary", dependencies=[Depends(require_ingest_token)])
+def shadow_summary(
+    response: Response,
+    hours: int = Query(default=24, ge=1, le=settings.max_history_hours),
+    store: StatsStore = Depends(get_store),
+) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    summary = store.shadow_summary(hours)
+    summary["configured_model_id"] = shadow.model_id if shadow is not None else None
+    summary["shadow_available"] = bool(shadow is not None and shadow.loaded and not shadow.load_error)
+    return summary

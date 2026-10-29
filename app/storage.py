@@ -133,6 +133,22 @@ class StatsStore:
                     packets INTEGER NOT NULL,
                     known_packets INTEGER NOT NULL
                 );
+                -- Shadow-model output only; never read by public summaries or counters.
+                CREATE TABLE IF NOT EXISTS shadow_predictions (
+                    source TEXT NOT NULL,
+                    flow_id TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    predicted_label TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    validation_status TEXT NOT NULL,
+                    validation_reason TEXT,
+                    production_label TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (source, flow_id, model_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_shadow_predictions_observed
+                    ON shadow_predictions(observed_at);
                 """
             )
             self._connection.execute("BEGIN IMMEDIATE")
@@ -333,7 +349,69 @@ class StatsStore:
             batches += 1
             if count < 1000:
                 break
+        batches = 0
+        while max_batches is None or batches < max_batches:
+            with self._lock, self._connection:
+                count = self._connection.execute(
+                    """DELETE FROM shadow_predictions WHERE rowid IN
+                       (SELECT rowid FROM shadow_predictions WHERE observed_at < ? LIMIT 1000)""",
+                    (cutoff,),
+                ).rowcount
+            batches += 1
+            if count < 1000:
+                break
         return deleted
+
+    def record_shadow_predictions(self, source: str, model_id: str, rows: list[tuple]) -> int:
+        """Store (observed_at, production summary label, shadow prediction) rows; replays are ignored."""
+        created_at = to_sqlite_dt(utcnow())
+        values = []
+        for observed_at, production_label, prediction in rows:
+            if (not prediction.flow_id or not math.isfinite(prediction.confidence)
+                    or not 0 <= prediction.confidence <= 1
+                    or prediction.validation_status not in ("classified", "unvalidated")
+                    or production_label not in self._summary_labels):
+                raise ValueError("Invalid shadow prediction.")
+            values.append((source, prediction.flow_id, model_id, to_sqlite_dt(observed_at),
+                           prediction.predicted_label, prediction.confidence, prediction.validation_status,
+                           prediction.validation_reason, production_label, created_at))
+        with self._lock, self._connection:
+            before = self._connection.total_changes
+            self._connection.executemany(
+                "INSERT OR IGNORE INTO shadow_predictions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", values)
+            return self._connection.total_changes - before
+
+    def shadow_summary(self, history_hours: int) -> dict:
+        cutoff = to_sqlite_dt(utcnow() - timedelta(hours=history_hours))
+        models: dict[str, dict] = {}
+        with self._lock:
+            for row in self._connection.execute(
+                """SELECT model_id, validation_status, validation_reason, production_label, predicted_label,
+                          COUNT(*) AS total
+                   FROM shadow_predictions WHERE observed_at >= ?
+                   GROUP BY 1, 2, 3, 4, 5""",
+                (cutoff,),
+            ):
+                model = models.setdefault(row["model_id"], {
+                    "flows": 0, "classified": 0, "unvalidated_reasons": {}, "shadow_counts": {},
+                    "agreement": {}, "production_alerts": 0, "shadow_alerts": 0})
+                total = int(row["total"])
+                model["flows"] += total
+                production = row["production_label"]
+                if production not in ("BENIGN", UNVALIDATED):
+                    model["production_alerts"] += total
+                if row["validation_status"] == "unvalidated":
+                    reasons = model["unvalidated_reasons"]
+                    reasons[row["validation_reason"]] = reasons.get(row["validation_reason"], 0) + total
+                    continue
+                model["classified"] += total
+                shadow = row["predicted_label"]
+                model["shadow_counts"][shadow] = model["shadow_counts"].get(shadow, 0) + total
+                if shadow != "BENIGN":
+                    model["shadow_alerts"] += total
+                matrix = model["agreement"].setdefault(production, {})
+                matrix[shadow] = matrix.get(shadow, 0) + total
+        return {"generated_at": utcnow(), "history_hours": history_hours, "models": models}
 
     def build_summary(self, recent_window_minutes: int, history_hours: int, stale_after_seconds: int = 300) -> dict:
         now = utcnow()

@@ -117,6 +117,247 @@ For labeled JSONL with `label`, `source`, and either `conn` or `flow`, use
 .\.venv\Scripts\python.exe -m tools.verify_model --csv data/evaluation/cic.csv data/evaluation/solarmainframe/02-15-2018.csv data/evaluation/solarmainframe/02-21-2018.csv data/evaluation/solarmainframe/03-02-2018.csv --output-dir data/evaluation/all-classes
 ```
 
+## Retraining baseline and dataset preparation
+
+For new homelab collection, use the standalone `tools/capture_session.py` and
+follow `training/CAPTURE_GUIDE.md`. It pairs full-packet Linux capture with UTC
+activity markers, command outcomes, capture-quality checks and a sealed hash
+manifest. Activities remain unreviewed until matched to protocol evidence.
+
+The offline retraining tools keep the existing input shape `(N, 80)`. The default
+class map has four outputs; `training/labels.five-class.json` defines a separate
+five-output candidate with `BRUTE_FORCE` distinct from `OTHER_ATTACK`. The root
+production model and its four-class map remain unchanged. Training uses the production Zeek converter for every source;
+original CICFlowMeter feature CSVs are not accepted by this preparation path.
+Observation times remain in metadata, while the model timestamp column is set
+to zero before fitting the new scaler and during inference.
+
+Keep private captures, label evidence, prepared datasets, and candidate model
+bundles under gitignored `data/`. Commit reusable tools, reviewed configuration
+templates, synthetic fixtures, and sanitized aggregate results. Real captures,
+endpoint details, and operational notes require a separate private backup.
+`CONVERSATION_CONTEXT.md` is also ignored because it contains operational details.
+
+### Reviewed source recipes
+
+Copy `training/dataset.example.json` into a private working recipe and replace
+the example paths and SHA-256 values. Paths resolve relative to that recipe.
+Each source entry requires:
+
+- `path` and `sha256`: reviewed JSONL rows containing `source`, a real class
+  `label`, and a Zeek `conn` record, as accepted by the offline evaluator.
+- `provenance_path`, `provenance_sha256`, and `label_basis`: independently
+  reviewed label evidence. Hashes pin the reviewed input; they do not certify
+  label quality by themselves.
+- `origin`: the source dataset or collection environment, for auditing whether
+  a class is confounded with its source. Include reviewed benign examples from
+  public sources as well as attacks and homelab workloads.
+- `group`: the complete capture/session grouping boundary. Related captures
+  from one campaign may need the same group even when stored in separate files.
+- `split`: explicitly `train`, `validation`, `test`, or `regression`.
+
+A top-level `label_map` object may specify a separate candidate map by `path` and
+`sha256`; paths resolve relative to the recipe. Indices must be contiguous and
+follow LabelEncoder's alphabetic order. Keeping the candidate specification
+separate avoids changing the class map expected by the deployed four-output model.
+Optional source fields `max_records_per_label` and `sample_seed` apply reproducible
+reservoir sampling within an already assigned capture split. Every input row is
+still validated and checked for duplicate identities before sampling; manifests
+record full source counts and sampling parameters.
+
+Keep whole related sessions in one split. Preparation rejects group overlap,
+duplicate flow IDs even under different source aliases, unknown labels,
+invalid features, changed source/evidence hashes, and precomputed feature rows.
+It never silently discards invalid observations or assigns labels from model
+predictions. `UNVALIDATED` is an operational status, not a training truth label.
+
+```powershell
+.\.venv\Scripts\python.exe -m tools.prepare_training_dataset `
+  data/datasets/reviewed.recipe.json --output data/datasets/nids-v1-prepared
+```
+
+The new output contains canonical `records.jsonl`, per-split JSONL files,
+the recipe snapshot, and a manifest with class/group counts, source hashes,
+feature order, and converter/validation/inference code hashes. Existing output
+directories are never overwritten. Reprepare a new version after changing the
+feature contract or its preprocessing code.
+
+The current private seed, `data/datasets/nids-v1-seed`, contains 38 reviewed
+benign homelab flows assigned to `regression`. It is intentionally marked
+`ready_for_four_class_training: false`. Previously inspected captures are useful
+regression cases and must not be relabeled as an untouched final test.
+
+### Public raw attack captures
+
+[CSE-CIC-IDS2018](https://www.unb.ca/cic/datasets/ids-2018.html) provides raw
+captures and scenario descriptions. Its daily PCAP ZIPs are tens of gigabytes.
+`tools.cicids_archives` uses anonymous AWS CLI reads to inspect a 1 MiB ZIP tail
+and fetch only a selected member with S3 byte ranges. It verifies the archive
+ETag, range lengths, decompressed length, and CRC, then records the capture hash
+and source provenance. Download/extraction budgets are explicit; archive member
+names never determine output filesystem paths. AWS CLI must be installed.
+
+```powershell
+.\.venv\Scripts\python.exe -m tools.cicids_archives catalog `
+  --day Thursday-15-02-2018 `
+  --output data/datasets/cicids2018/Thursday-15-02-2018.archive.json
+
+.\.venv\Scripts\python.exe -m tools.cicids_archives fetch `
+  data/datasets/cicids2018/Thursday-15-02-2018.archive.json `
+  --member pcap/UCAP172.31.69.25 `
+  --output data/datasets/cicids2018/Thursday-15-02-2018.victim-172.31.69.25.pcap
+```
+
+Supported starter catalogs cover February 14 (SSH/FTP brute force), February 15
+(DoS), February 21 (DDoS), and March 2 (botnet). Defaults cap a selected member at
+256 MiB compressed and 1 GiB extracted; larger members require explicit budget
+arguments. Repeat operations with fresh output paths; existing files and failed
+partial files are preserved for inspection.
+
+The private starter manifest at
+`data/datasets/cicids2018/starter-capture-manifest.json` records three downloaded
+victim captures, totaling about 1.09 GB: February 14, February 15, and March 2.
+The acquisition manifest records the initial unreviewed captures. Per-flow
+curation and extraction evidence live under `data/datasets/public-import`.
+Checks detected incomplete final packet
+records in the two Ubuntu source captures, despite valid archive CRCs. Preserve
+the originals and record any subsequent trimming or exclusions explicitly.
+The February 21 DDoS capture was cataloged but not downloaded because its members
+expand to approximately 18.3 GB and 2.1 GB.
+
+Run the pinned production Zeek version offline before converting public captures.
+Record the image, checksum handling, command, input hashes, and capture quality.
+Verify published attack identities, timezones, and actual timing against packet
+or system-log evidence before assigning labels. A scenario name or an entire
+attack-day capture is not a per-flow truth label. Leave ambiguous traffic
+unlabeled; retain conversion rejections for review. Dataset/source citations
+must accompany redistributed public data.
+
+### Import CICIDS2017 and IoT-23
+
+Keep original PCAPs, `GeneratedLabelledFlows.zip`, IoT scenario READMEs, and
+`conn.log.labeled` files intact. File extensions are not a format guarantee:
+the supplied CICIDS2017 `.pcap` files contain PCAPNG blocks, while IoT label files
+can mix tabs and multi-space separators. The importer handles both label layouts
+and excludes explicitly empty CIC CSV rows without assigning them a benign label.
+
+For a bounded development corpus, sample original source labels reproducibly and
+retain every packet of the selected bidirectional TCP/UDP tuples across the whole
+capture. This preserves original packet bytes, timestamps, lengths, handshakes,
+and repeated connections using those tuples. Fragments/non-TCP/UDP packets remain
+as context. Sampling occurs within fixed capture groups and does not create a
+deployment-prevalence evaluation set.
+
+```powershell
+.\.venv\Scripts\python.exe -m tools.subset_public_capture `
+  data/datasets/cicids2017/Tuesday-WorkingHours.pcap `
+  --labels-zip data/datasets/cicids2017/GeneratedLabelledFlows.zip `
+  --member 'TrafficLabelling /Tuesday-WorkingHours.pcap_ISCX.csv' `
+  --output data/datasets/public-import/tuesday-new-version --per-label 2000
+```
+
+On a Linux Docker host with the pinned image already cached, run:
+
+```bash
+bash training/run-zeek-offline.sh INPUT_CAPTURE NEW_OUTPUT_DIRECTORY
+```
+
+The helper uses the production image digest, checksum ignoring, JSON output,
+network isolation, a read-only root filesystem, one CPU, and a 1 GiB memory limit.
+It records input/image/log hashes and command metadata; existing outputs are not
+overwritten. It processes files offline and never replays packets onto the LAN.
+
+Join the resulting JSON connection log to the original labels:
+
+```powershell
+.\.venv\Scripts\python.exe -m tools.public_labels `
+  --conn data/datasets/public-import/tuesday-new-version/zeek/conn.log `
+  --cic-labels data/datasets/public-import/tuesday-new-version/source-labels.jsonl `
+  --source cicids2017-tuesday --output data/datasets/public-import/tuesday-new-version/labels
+```
+
+For IoT-23, replace `--cic-labels` with `--iot-labels PATH_TO_CONN_LOG_LABELED`.
+`tools.public_labels` maps documented C&C to `BOTNET`, DDoS to `DOS_DDOS`, and
+scanning to `OTHER_ATTACK`; infection or a malware-family name alone never labels
+every connection botnet. Credential guessing maps to `BRUTE_FORCE`; XSS/SQL
+injection remain `OTHER_ATTACK`.
+
+UIDs differ across Zeek runs. IoT joins require bidirectional endpoint/protocol
+tuples and start timestamps within 1 ms, with agreeing overlapping source labels.
+CICIDS2017 joins infer the source clock from unique tuples, requiring at least
+20 anchors and 95% agreement, then account for minute precision and 12-hour CSV
+ambiguity. Conflicting, unmapped, or unmatched connections stay unreviewed.
+The supplied captures establish a three-hour clock offset; the CICIDS2018 sources
+establish four hours. These offsets are evidence-derived, not blanket UTC assumptions.
+
+Some CICIDS2018 CSVs omit endpoint identifiers. `--cse-csv` permits only signatures
+unique in both inputs using protocol, destination port, directional packet counts,
+exact microsecond duration, and aligned seconds; at least 20 anchors and 99%
+clock agreement are required. No original CSV feature vector becomes model input.
+
+Where row matches are insufficient for known campaigns, `tools.label_scenarios`
+uses separately reviewed publisher endpoint/service/time specifications. The
+brute-force rules in `training/cicids2018-bruteforce-scenarios.json` require clock
+verification, exact actor/victim/service matches, and full connection containment
+inside the published window. They also require failed-authentication evidence
+from `ssh.log` or `ftp.log`; refused TCP handshakes alone are insufficient.
+Conflicting row labels are excluded. SSH outcomes are Zeek's network inference,
+not host authentication audit logs. Their provenance is distinct from direct row
+matches, and label reports hash the protocol evidence used.
+
+```powershell
+.\.venv\Scripts\python.exe -m tools.label_scenarios `
+  --conn data/datasets/public-import/cicids2018-bruteforce/zeek/conn.log `
+  --reference-csv data/evaluation/cic.csv `
+  --scenarios training/cicids2018-bruteforce-scenarios.json `
+  --source cicids2018-bruteforce-20180214 `
+  --output data/datasets/public-import/cicids2018-bruteforce/labels-auth-new-version
+```
+
+Every import writes labeled records, per-flow evidence, separate unmatched and
+rejection files, and a reconciled report with hashes. Original source captures
+remain unchanged. The two truncated CICIDS2018 files were handled with explicit
+derivatives excluding only incomplete final records (65 and 307 bytes); derivation
+manifests retain original/derivative hashes and exact discarded lengths.
+
+### Train a separate candidate
+
+Once reviewed data covers every class in both training and validation:
+
+```powershell
+.\.venv\Scripts\python.exe -m tools.train_model `
+  data/datasets/nids-v1-prepared --output data/models/candidate-001 `
+  --epochs 50 --batch-size 256 --patience 5 --seed 20261029
+```
+
+Training refuses incomplete class coverage before loading TensorFlow or creating
+candidate output. It fits a fresh scaler and class weights on training data only,
+uses validation loss for early stopping, and trains an `80 -> 128 -> 64 -> C`
+dense baseline with dropout. The initial implementation loads reviewed records
+into memory; use an explicitly documented, reproducible subset for large corpora.
+
+The separate bundle contains the model, scaler, label encoder, feature order,
+label map, and a report with dataset/code/artifact hashes, package versions,
+configuration, and validation/regression metrics. It is reloaded and scored
+through the actual production classifier to check compatibility. Test records
+do not influence scaling, class weights, optimization, or early stopping, and
+are not automatically scored. Deterministic settings and seeds are recorded;
+cross-platform bit-for-bit reproducibility is not guaranteed.
+
+The tools do not replace the root model files or deploy a candidate. Compare
+against the existing model on whole held-out sessions before promotion. ICMPv6
+continues to use the existing operational unvalidated policy.
+`C` comes from the candidate class map. Before deploying a five-class candidate,
+the dashboard's class list/cards must also be updated to display `BRUTE_FORCE`.
+Training does not perform that production change automatically.
+
+The current local development corpus is `data/datasets/nids-v4`, with its recipe
+alongside it and a dataset card inside it. It has 49,761 training, 13,514 validation,
+and 38 regression records; no final-test capture is assigned. Its independent
+brute-force validation covers SSH only. The current candidate fails the benign
+homelab regression and is unsuitable for deployment. Sanitized counts, results,
+and the next collection priorities are recorded in `training/BASELINE_RESULTS.md`.
+
 ## Zeek feature conversion
 
 Protocol conversion prefers Zeek's numeric `ip_proto` field. Zeek can report

@@ -1,0 +1,31 @@
+{
+  "documentation": "https://www.unb.ca/cic/datasets/ids-2018.html",
+  "clock_offset_hours_modulo_12_required": 4,
+  "require_failed_authentication_evidence": true,
+  "scenarios": [
+    {
+      "name": "CSE-CIC-IDS2018 FTP-BruteForce 2018-02-14",
+      "label": "BRUTE_FORCE",
+      "attackers": ["18.221.219.4", "172.31.70.4"],
+      "victim": "172.31.69.25",
+      "protocol": 6,
+      "destination_port": 21,
+      "published_local_start": "2018-02-14 10:32",
+      "published_local_end": "2018-02-14 12:09",
+      "start_utc": "2018-02-14T14:32:00Z",
+      "end_utc": "2018-02-14T16:09:00Z"
+    },
+    {
+      "name": "CSE-CIC-IDS2018 SSH-Bruteforce 2018-02-14",
+      "label": "BRUTE_FORCE",
+      "attackers": ["13.58.98.64", "172.31.70.6"],
+      "victim": "172.31.69.25",
+      "protocol": 6,
+      "destination_port": 22,
+      "published_local_start": "2018-02-14 14:01",
+      "published_local_end": "2018-02-14 15:31",
+      "start_utc": "2018-02-14T18:01:00Z",
+      "end_utc": "2018-02-14T19:31:00Z"
+    }
+  ]
+}
