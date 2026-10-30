@@ -211,7 +211,8 @@ work="${session}-processing"
 here. See its [official manual](https://www.wireshark.org/docs/man-pages/mergecap.html).
 The Zeek helper requires the pinned image already cached on that Linux Docker
 host. It uses checksum ignoring (`-C`) for the previously observed offload issue,
-and records input/image/log hashes. Preserve any merge error and do not process
+decodes K3s VXLAN on UDP 8472 with `training/zeek-tunnel-policy.zeek` (the same
+decoding as the sensor), and records input/image/policy/log hashes. Preserve any merge error and do not process
 a partial input. If only one PCAP exists, it can be passed directly to the helper.
 
 Finally, match journal evidence to connection tuples and protocol logs. Retain

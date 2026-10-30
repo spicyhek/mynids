@@ -264,6 +264,8 @@ bash training/run-zeek-offline.sh INPUT_CAPTURE NEW_OUTPUT_DIRECTORY
 
 The helper uses the production image digest, checksum ignoring, JSON output,
 network isolation, a read-only root filesystem, one CPU, and a 1 GiB memory limit.
+It loads `training/zeek-tunnel-policy.zeek`, the sensor's VXLAN UDP 8472 decoding,
+so inner pod connections are logged; the policy's hash is recorded with the run.
 It records input/image/log hashes and command metadata; existing outputs are not
 overwritten. It processes files offline and never replays packets onto the LAN.
 
