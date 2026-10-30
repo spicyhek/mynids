@@ -147,12 +147,16 @@ aggregation for distributed sources.
   `UNVALIDATED` with reason `window_not_warm`, as already done for ICMPv6.
 - Checkpointing window state is not required for v2.
 
-## Tunnels (depends on the VXLAN 8472 fix)
+## Tunnels (VXLAN 8472 decoding)
 
-- Inner pod connections are classified normally.
-- Outer UDP 8472 (and 4789) connections are not sent for inference. They are
-  counted as tunnel carriers for packet totals, so encapsulated packets are not
-  counted twice.
+- The sensor policy (homelab-infra `k8s/daemonsets/zeek/local.zeek`) and the
+  offline helper (`training/zeek-tunnel-policy.zeek`) decode UDP 8472. Inner pod
+  connections carry `tunnel_parents` and are classified normally.
+- Outer UDP 8472 (and 4789) connections are not v2 observations. Once decoded,
+  Zeek tags them service `vxlan` and the exporter does not send them at all: their
+  packets reach the totals once, through the inner flows. An undecoded carrier
+  (no `vxlan` service) is still sent as a v1 flow, so nothing disappears if the
+  policy is missing.
 - Outer and inner flows have separate window state: an inner pod flow does not
   update the node-to-node outer keys, and the reverse.
 
@@ -194,7 +198,8 @@ Implemented locally; nothing is deployed.
 - **Exporter** (`--features-v2` or `NIDS_EXPORT_FEATURES_V2=1`): one window state
   per process. Every valid conn.log line goes through it once, in log order,
   even if v1 rejects the line. A line re-read after a failed export goes out
-  without v2 rather than being counted twice. VXLAN carriers stay v1-only. If the
+  without v2 rather than being counted twice. Undecoded VXLAN carriers stay
+  v1-only; decoded ones are not sent (see Tunnels). If the
   server rejects the v2 fields with 422, the batch is resent without them, so
   v1 flows are never quarantined because of shadow data.
 - The dashboard needs `BRUTE_FORCE` before any five-class promotion.

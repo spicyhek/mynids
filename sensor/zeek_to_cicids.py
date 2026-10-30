@@ -113,6 +113,11 @@ class FeatureV2Stream:
             return None  # v2 rejected the record before touching window state; v1 is unaffected.
 
 
+def is_decoded_tunnel_carrier(record: dict[str, Any]) -> bool:
+    """An outer connection Zeek decoded (service "vxlan"); its inner flows carry the same packets."""
+    return "vxlan" in str(record.get("service") or "").split(",")
+
+
 def parse_zeek_json_line(line: str) -> dict[str, Any] | None:
     text = line.strip()
     if not text or text.startswith("#"):
@@ -555,6 +560,8 @@ def export_log_once(*, log_path: Path, endpoint: str, state_file: Path,
                 if parsed is not None:
                     # v2 sees every valid record first, as offline preparation does, even one v1 rejects.
                     v2 = features_v2.process(identity, offset, parsed) if features_v2 is not None else None
+                    if is_decoded_tunnel_carrier(parsed):
+                        continue  # Sending it as well as its inner flows would count each packet twice.
                     flow = conn_record_to_flow(parsed)
                     if v2 is not None:
                         flow.update(features_v2=v2["features"], window_warm=v2["window_warm"],

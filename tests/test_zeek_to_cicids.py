@@ -138,6 +138,31 @@ class ZeekToCicidsTests(unittest.TestCase):
             self.assertEqual(len(flows), 1)
             self.assertEqual(set(flows[0]["features"]), set(self.feature_order))
 
+    def test_decoded_vxlan_carriers_are_not_exported(self) -> None:
+        # Shape of K3s flannel traffic once Zeek decodes UDP 8472: the outer flow is tagged and its
+        # inner pod flow names it as a tunnel parent. An undecoded 8472 flow is still sent.
+        outer = {**SAMPLE_CONN_RECORD, "uid": "Couter", "proto": "udp", "service": "vxlan",
+                 "id.orig_h": "192.168.1.122", "id.resp_h": "192.168.1.78", "id.resp_p": 8472,
+                 "history": "Dd", "orig_pkts": 2, "resp_pkts": 2}
+        inner = {**SAMPLE_CONN_RECORD, "uid": "Cinner", "proto": "udp", "service": "dns",
+                 "id.orig_h": "10.42.0.12", "id.resp_h": "10.42.2.3", "id.resp_p": 53,
+                 "history": "Dd", "orig_pkts": 2, "resp_pkts": 2, "tunnel_parents": ["Couter"]}
+        undecoded = {**outer, "uid": "Cundecoded", "service": None}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            log_path = temp_path / "conn.log"
+            state_file = temp_path / "state.json"
+            log_path.write_text("".join(json.dumps(r) + "\n" for r in (outer, inner, undecoded, SAMPLE_CONN_RECORD)),
+                                encoding="utf-8")
+            with patch("sensor.zeek_to_cicids.send_payload", side_effect=acknowledge) as send_payload:
+                exported = export_log_once(log_path=log_path, endpoint="http://nids/api/internal/flows",
+                                           state_file=state_file, source_name="zeek-worker-node-a",
+                                           token="t", batch_size=100)
+            flows = send_payload.call_args.args[3]
+            self.assertEqual(exported, 3)
+            self.assertEqual([f["flow_id"].split(":")[0] for f in flows], ["Cinner", "Cundecoded", SAMPLE_CONN_RECORD["uid"]])
+            self.assertEqual(json.loads(state_file.read_text())["offset"], log_path.stat().st_size)
+
     def test_exported_batch_matches_ingest_contract_and_summary_store(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
