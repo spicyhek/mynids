@@ -1,6 +1,7 @@
 """Versioned, reviewed Zeek datasets for the existing 80-feature production contract."""
 from __future__ import annotations
 
+from array import array
 from collections import Counter
 import hashlib
 import json
@@ -117,6 +118,60 @@ def extract_v2_log(path: Path) -> tuple[dict, dict]:
     return observations, dict(counts)
 
 
+def record_digest(record: dict) -> bytes:
+    """Canonical digest standing in for whole-record equality (stricter: 1 vs 1.0 differs)."""
+    return hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=True).encode("utf-8")).digest()
+
+
+def index_v2_log(path: Path) -> tuple[dict, dict]:
+    """extract_v2_log with compact storage, so multi-million-record public captures fit in memory.
+
+    Same replay, window state, counts and duplicate handling. Each uid maps to
+    (record digest, compact flow or None for a tunnel carrier); compact flows keep feature
+    key order and exact float values (array 'd'), so expand_v2_flow returns the original flow.
+    """
+    extractor = zeek_features_v2.Extractor()
+    observations, duplicates, key_orders = {}, set(), {}
+    counts = Counter()
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                record = parse_zeek_json_line(line)
+                if record is None:
+                    continue
+                flow = extractor.process(record)
+            except (ValueError, KeyError, TypeError, OverflowError):
+                counts["invalid_skipped"] += 1
+                continue
+            counts["records"] += 1
+            compact = None
+            if flow is None:
+                counts["tunnel_carriers"] += 1
+            else:
+                if set(flow) != {"flow_id", "event_time", "features", "window_warm", "window_degraded"} \
+                        or any(type(value) is not float for value in flow["features"].values()):
+                    raise ValueError("Unexpected v2 flow shape; compact indexing would not be lossless.")
+                keys = tuple(flow["features"])
+                keys = key_orders.setdefault(keys, keys)
+                compact = (flow["flow_id"], flow["event_time"], keys, array("d", flow["features"].values()),
+                           flow["window_warm"], flow["window_degraded"])
+            uid = record["uid"]
+            if uid in observations:
+                duplicates.add(uid)
+            observations[uid] = record_digest(record), compact
+    for uid in duplicates:
+        observations[uid] = None  # Ambiguous: a reviewed row cannot be joined to one record.
+    counts["duplicate_uids"] = len(duplicates)
+    return observations, dict(counts)
+
+
+def expand_v2_flow(compact) -> dict:
+    flow_id, event_time, keys, values, warm, degraded = compact
+    return {"flow_id": flow_id, "event_time": event_time, "features": dict(zip(keys, values)),
+            "window_warm": warm, "window_degraded": degraded}
+
+
 def validate_flow(value: dict, feature_order: list[str]) -> dict:
     flow = FlowRecord.model_validate(value).model_dump(mode="json")
     if set(flow["features"]) != set(feature_order):
@@ -206,7 +261,7 @@ def prepare(recipe_path: Path, output: Path) -> dict:
             conn_log = (recipe_path.parent / entry["conn_log_path"]).resolve()
             if sha256(conn_log) != entry["conn_log_sha256"]:
                 raise ValueError("Complete conn.log hash mismatch; review changes before updating the recipe.")
-            observations, window_context = extract_v2_log(conn_log)
+            observations, window_context = index_v2_log(conn_log)
         maximum = entry.get("max_records_per_label")
         sampling, buckets, original_counts = None, {}, Counter()
         if maximum is not None:
@@ -234,9 +289,9 @@ def prepare(recipe_path: Path, output: Path) -> dict:
                     observed = observations.get(row["conn"].get("uid"))
                     if observed is None:
                         raise ValueError("Reviewed connection is absent from, or ambiguous in, the complete conn.log.")
-                    if observed[0] != row["conn"]:
+                    if observed[0] != record_digest(row["conn"]):
                         raise ValueError("Reviewed conn record differs from the complete conn.log record.")
-                    v2_flow = observed[1]
+                    v2_flow = None if observed[1] is None else expand_v2_flow(observed[1])
                     if v2_flow is None:
                         reason = "tunnel_carrier"
                     elif v2_flow["window_degraded"]:
