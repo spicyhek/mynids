@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 from urllib import error
 
 import joblib
@@ -16,9 +16,10 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app import main
-from app.inference import ModelArtifacts
+from app.config import Settings
+from app.inference import FlowClassifier, ModelArtifacts
 from app.schemas import FlowBatchRequest
-from app.shadow import CONTRACT_ID, MODEL_FILE, ShadowClassifier
+from app.shadow import CONTRACT_ID, MODEL_FILE, ShadowClassifier, ShadowPrediction
 from app.storage import PredictionRow, utcnow
 from sensor.zeek_features_v2 import FEATURE_ORDER, Extractor
 from sensor.zeek_to_cicids import FeatureV2Stream, export_log_once
@@ -124,7 +125,7 @@ class ShadowApiTests(unittest.TestCase):
         self.shadow.load()
         settings = replace(main.settings, db_path=root / "nids.sqlite3", ingest_token="test-token")
         self.enterContext(patch.object(main, "settings", settings))
-        self.enterContext(patch.object(main, "shadow", self.shadow))
+        self.enterContext(patch.object(main, "tree", self.shadow))
         self.enterContext(patch.object(main.classifier, "load", return_value=ModelArtifacts(V1_LABELS, [])))
         self.client = self.enterContext(TestClient(main.app))
         self.headers = {"X-Ingest-Token": "test-token"}
@@ -156,6 +157,9 @@ class ShadowApiTests(unittest.TestCase):
         self.assertEqual(model["unvalidated_reasons"], {"window_not_warm": 1})
         self.assertEqual(model["agreement"], {"DOS_DDOS": {"BENIGN": 1, "DOS_DDOS": 1}})
         self.assertEqual((model["production_alerts"], model["shadow_alerts"]), (2, 1))
+        self.assertEqual(summary["operational_model"], "keras")
+        self.assertEqual(summary["operational_label_sources"], {"cicids2018_dense_model": 3})
+        self.assertEqual(public["model_name"], "cicids2018_dense_model")
 
     def test_v2_payload_does_not_change_v1_identity(self):
         flow = v2_flow("same")
@@ -179,6 +183,113 @@ class ShadowApiTests(unittest.TestCase):
             health = self.client.get("/healthz").json()
         self.assertTrue(any("Shadow model" in warning for warning in health["warnings"]))
         self.assertNotIn("Shadow", json.dumps(self.client.get("/api/public/summary").json()))
+
+
+class OperationalV2ApiTests(unittest.TestCase):
+    """NIDS_OPERATIONAL_MODEL=v2: v2 labels the flows it can judge, Keras labels the rest and runs in shadow."""
+    KERAS_ID = "cicids2018_dense_model:0123456789ab"
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        sha = write_bundle(root / "candidate")
+        self.tree = ShadowClassifier(root / "candidate", sha)
+        settings = replace(main.settings, db_path=root / "nids.sqlite3", ingest_token="test-token",
+                           operational_model="v2", v2_model_dir=root / "candidate", v2_model_sha256=sha)
+        self.enterContext(patch.object(main, "settings", settings))
+        self.enterContext(patch.object(main, "tree", self.tree))
+        self.enterContext(patch.object(main, "tree_runtime_error", None))
+        self.enterContext(patch.object(main.classifier, "load", return_value=ModelArtifacts(V1_LABELS, [])))
+        self.enterContext(patch.object(main.classifier, "model_id", self.KERAS_ID))
+        self.enterContext(patch.object(FlowClassifier, "loaded", new_callable=PropertyMock, return_value=True))
+        self.client = self.enterContext(TestClient(main.app))
+        self.headers = {"X-Ingest-Token": "test-token"}
+
+    def post(self, flows, keras_label="OTHER_ATTACK", contract=CONTRACT_ID):
+        rows = [PredictionRow(utcnow(), keras_label, 0.9) for _ in flows]
+        payload = {"source": "zeek", "features_v2_contract": contract, "flows": flows}
+        with patch.object(main.classifier, "classify_batch", return_value=rows):
+            return self.client.post("/api/internal/flows", json=payload, headers=self.headers)
+
+    def model_ids(self):
+        events = self.client.get("/api/internal/events", headers=self.headers).json()
+        return {event["flow_id"]: event["model_id"] for event in events}
+
+    def test_v2_labels_judged_flows_and_keras_labels_the_rest(self):
+        v1_only = {k: v for k, v in v2_flow("v1-only").items() if k in ("flow_id", "event_time", "features")}
+        flows = [v2_flow("ok"), v2_flow("dos", port=80), v2_flow("cold", warm=False),
+                 v2_flow("lossy", warm=False, degraded=True), v2_flow("icmp6", protocol=58), v1_only]
+        response = self.post(flows)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["labels"], {"BENIGN": 1, "BOTNET": 0, "BRUTE_FORCE": 0, "DOS_DDOS": 1,
+                                                     "OTHER_ATTACK": 3, "UNVALIDATED": 1})
+        tree_id = self.tree.model_id
+        self.assertEqual(self.model_ids(), {"ok": tree_id, "dos": tree_id, "icmp6": tree_id,
+                                            "cold": self.KERAS_ID, "lossy": self.KERAS_ID,
+                                            "v1-only": self.KERAS_ID})
+        summary = self.client.get("/api/internal/shadow/summary", headers=self.headers).json()
+        self.assertEqual((summary["operational_model"], summary["configured_model_id"]), ("v2", self.KERAS_ID))
+        self.assertTrue(summary["shadow_available"])
+        self.assertEqual(summary["operational_label_sources"], {tree_id: 3, self.KERAS_ID: 3})
+        # Keras is recorded in shadow only for the flows v2 labeled.
+        self.assertEqual(list(summary["models"]), [self.KERAS_ID])
+        keras = summary["models"][self.KERAS_ID]
+        self.assertEqual((keras["flows"], keras["classified"]), (3, 2))
+        self.assertEqual(keras["unvalidated_reasons"], {"icmpv6_detection_not_validated": 1})
+        self.assertEqual(keras["agreement"], {"BENIGN": {"OTHER_ATTACK": 1}, "DOS_DDOS": {"OTHER_ATTACK": 1}})
+        public = self.client.get("/api/public/summary").json()
+        self.assertEqual(public["model_name"], "candidate")
+        self.assertNotIn("shadow", json.dumps(public).lower())
+        self.assertEqual(self.client.get("/healthz").json()["status"], "ok")
+        # A replay is a duplicate whichever model labeled it.
+        self.assertEqual(self.post(flows).json()["duplicates"], 6)
+
+    def test_v2_only_labels_are_stored_and_summarized(self):
+        prediction = ShadowPrediction("bf", "BRUTE_FORCE", 0.8, "classified", None)
+        with patch.object(self.tree, "classify", return_value=[prediction]):
+            response = self.post([v2_flow("bf")], keras_label="BENIGN")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["labels"]["BRUTE_FORCE"], 1)
+        self.assertEqual(self.client.get("/api/public/summary").json()["recent_counts"]["BRUTE_FORCE"], 1)
+
+    def test_v2_failure_falls_back_to_keras_and_degrades_health_but_not_readiness(self):
+        with patch.object(self.tree, "classify", side_effect=RuntimeError("model crashed")):
+            response = self.post([v2_flow("a"), v2_flow("b", port=80)])
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["labels"]["OTHER_ATTACK"], 2)
+        self.assertEqual(set(self.model_ids().values()), {self.KERAS_ID})
+        health = self.client.get("/healthz").json()
+        self.assertEqual(health["status"], "degraded")
+        self.assertTrue(any("Keras fallback" in warning for warning in health["warnings"]))
+        self.assertEqual(self.client.get("/readyz").status_code, 200)
+        public = self.client.get("/api/public/summary").json()
+        self.assertTrue(any("Keras fallback" in warning for warning in public["warnings"]))
+        summary = self.client.get("/api/internal/shadow/summary", headers=self.headers).json()
+        self.assertEqual(summary["models"], {})  # Nothing to compare when v2 labeled nothing.
+        # The next good batch restores v2 labels and health.
+        self.assertEqual(self.post([v2_flow("c")]).json()["labels"]["BENIGN"], 1)
+        self.assertEqual(self.client.get("/healthz").json()["status"], "ok")
+
+    def test_wrong_contract_falls_back_to_keras(self):
+        response = self.post([v2_flow("x")], keras_label="BENIGN", contract="zeek-conn-v9")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.model_ids(), {"x": self.KERAS_ID})
+        self.assertEqual(self.client.get("/healthz").json()["status"], "degraded")
+
+    def test_unloadable_v2_bundle_keeps_ingesting_with_keras(self):
+        with patch.object(self.tree, "_model", None), patch.object(self.tree, "_expected_sha256", "0" * 64):
+            self.assertEqual(self.client.get("/healthz").json()["status"], "degraded")
+            self.assertEqual(self.post([v2_flow("a")]).status_code, 200)
+        self.assertEqual(self.model_ids(), {"a": self.KERAS_ID})
+
+
+class OperationalModelSettingsTests(unittest.TestCase):
+    def test_mode_must_be_known_and_v2_needs_a_bundle(self):
+        with self.assertRaisesRegex(ValueError, "must be 'keras' or 'v2'"):
+            replace(Settings(), operational_model="tree")
+        with self.assertRaisesRegex(ValueError, "requires NIDS_V2_MODEL_DIR"):
+            replace(Settings(), operational_model="v2", v2_model_dir=None)
 
 
 class ExporterShadowTests(unittest.TestCase):

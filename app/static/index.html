@@ -90,6 +90,10 @@
               <strong class="stat-value is-botnet" id="recent-botnet">—</strong>
             </article>
             <article class="stat-card">
+              <span class="meta-label">Suspected brute force</span>
+              <strong class="stat-value is-brute" id="recent-brute">—</strong>
+            </article>
+            <article class="stat-card">
               <span class="meta-label">Suspected dos / ddos</span>
               <strong class="stat-value is-dos" id="recent-dos">—</strong>
             </article>
@@ -116,14 +120,18 @@
               <p>Traffic the model predicts resembles activity from compromised machines.</p>
             </div>
             <div class="class-guide-item">
+              <span class="meta-label">Brute Force</span>
+              <p>Traffic the model predicts resembles repeated login attempts against SSH, FTP or web logins.</p>
+            </div>
+            <div class="class-guide-item">
               <span class="meta-label">DoS / DDoS</span>
               <p>Traffic the model predicts resembles denial-of-service activity.</p>
             </div>
             <div class="class-guide-item">
               <span class="meta-label">Other Attack</span>
               <p>
-                Model predictions for a combined class covering bruteforce attacks (XSS, SSH, FTP, WEB),
-                infiltration, and SQL injection.
+                Model predictions for a combined class covering infiltration, port scans, XSS and SQL injection.
+                Flows labeled by the earlier model also count brute force here.
               </p>
             </div>
             <div class="class-guide-item">
@@ -151,6 +159,7 @@
             <div class="chart-legend" aria-label="Hourly activity legend">
               <span class="pill is-benign">benign</span>
               <span class="pill is-botnet">botnet</span>
+              <span class="pill is-brute">brute force</span>
               <span class="pill is-dos">dos / ddos</span>
               <span class="pill is-other">other attack</span>
               <span class="pill is-unvalidated">unvalidated ICMPv6</span>

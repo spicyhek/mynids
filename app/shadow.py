@@ -1,7 +1,8 @@
-"""Optional shadow classifier for the zeek-conn-window-v2 contract.
+"""Tree classifier for the zeek-conn-window-v2 contract.
 
-Shadow predictions are stored separately and never change operational labels, counters or the
-dashboard. The model file is a pickle, so it loads only from an operator-configured directory and
+It runs either in shadow (predictions stored separately; operational labels, counters and the
+dashboard unchanged) or, with NIDS_OPERATIONAL_MODEL=v2, as the operational model for the flows it
+can judge. The model file is a pickle, so it loads only from an operator-configured directory and
 only when its SHA-256 matches the pinned value.
 """
 from __future__ import annotations
@@ -45,6 +46,25 @@ class ShadowClassifier:
     @property
     def loaded(self) -> bool:
         return self._model is not None
+
+    @property
+    def labels(self) -> list[str]:
+        return list(self._labels)
+
+    @property
+    def model_dir(self) -> Path:
+        return self._model_dir
+
+    @staticmethod
+    def read_labels(model_dir: Path) -> list[str]:
+        """The bundle's class labels from label_map.json, without unpickling anything."""
+        label_map = json.loads((model_dir / "label_map.json").read_text(encoding="utf-8"))
+        if not isinstance(label_map, dict) or set(label_map) != {str(i) for i in range(len(label_map))}:
+            raise ValueError("Label map must use contiguous class indices.")
+        labels = [label_map[str(i)] for i in range(len(label_map))]
+        if not all(isinstance(label, str) and label for label in labels) or len(set(labels)) != len(labels):
+            raise ValueError("Class labels must be unique and nonempty.")
+        return labels
 
     def load(self) -> None:
         with self._lock:

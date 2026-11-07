@@ -202,7 +202,25 @@ Implemented locally; nothing is deployed.
   v1-only; decoded ones are not sent (see Tunnels). If the
   server rejects the v2 fields with 422, the batch is resent without them, so
   v1 flows are never quarantined because of shadow data.
-- The dashboard needs `BRUTE_FORCE` before any five-class promotion.
+- The dashboard and public summary always carry `BRUTE_FORCE` (zero until a v2
+  label uses it), so their contract is the same in either operational mode.
+- **Operational v2** (`NIDS_OPERATIONAL_MODEL=v2`, default `keras`; the bundle is
+  `NIDS_V2_MODEL_DIR` / `NIDS_V2_MODEL_SHA256`, and the `NIDS_SHADOW_MODEL_*` names
+  are still accepted). Per flow:
+  - warm, undegraded window (and ICMPv6, stored as unvalidated either way): the
+    v2 label is stored;
+  - cold or degraded window, or no `features_v2` (VXLAN carriers, the exporter's
+    422 resend): the Keras label is stored;
+  - v2 unloadable or failing for a batch (including a contract mismatch): the
+    whole batch keeps Keras labels, `/healthz` is `degraded` with a public
+    warning, and `/readyz` stays ready so ingestion continues.
+  Every stored flow records `model_id`, the model whose label it carries
+  (`/api/internal/events`). Keras runs in shadow on the flows v2 labeled, so the
+  shadow summary's agreement matrix becomes v2 (production) versus Keras (shadow).
+  `operational_label_sources` in the shadow summary counts stored flows per model;
+  in v2 mode the Keras share is the fallback rate. The public `model_name` is the
+  v2 bundle directory name, and the first start in a new mode records the change
+  in `counter_provenance`, because lifetime counters span both models.
 
 ### Shadow rollout (for the operator, through GitOps)
 
@@ -223,6 +241,23 @@ Implemented locally; nothing is deployed.
 5. Run for at least a week. Review the agreement matrix and every alert source
    the shadow model raises. Rollback is unsetting the variables; shadow rows
    expire with retention.
+
+### Promotion to operational (for the operator, through GitOps)
+
+1. Deploy the image with this code and no variable changes. Behavior is
+   unchanged (`keras` is the default). Startup adds the `model_id` column; older
+   rows keep it NULL (`unrecorded`). Confirm `/healthz`, ingest and the shadow
+   summary as usual.
+2. Have a restorable database backup from before the switch.
+3. After the promotion gates below hold, including a full week of shadow, set
+   `NIDS_OPERATIONAL_MODEL=v2`. Keep the existing bundle variables. Confirm
+   `/healthz` is `ok`, the dashboard shows the v2 model name, and the shadow
+   summary reports `operational_model: v2` with Keras as `configured_model_id`.
+4. Watch for several days: the operational alert rate, the Keras share of
+   `operational_label_sources` (it should be mostly restarts' cold windows), and
+   every flow v2 labels as an attack that Keras labels benign.
+5. Rollback is setting `NIDS_OPERATIONAL_MODEL=keras` (or removing it). Rows keep
+   the `model_id` that labeled them.
 
 ## Promotion gates (proposal)
 

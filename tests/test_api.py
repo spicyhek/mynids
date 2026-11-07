@@ -59,7 +59,7 @@ class SummaryApiTests(unittest.TestCase):
             second = self.post(payload)
         self.assertEqual(first.status_code, 200, first.text)
         self.assertEqual(first.json()["labels"], {
-            "BENIGN": 0, "BOTNET": 1, "DOS_DDOS": 0, "OTHER_ATTACK": 1, "UNVALIDATED": 2})
+            "BENIGN": 0, "BOTNET": 1, "BRUTE_FORCE": 0, "DOS_DDOS": 0, "OTHER_ATTACK": 1, "UNVALIDATED": 2})
         self.assertEqual(second.json()["duplicates"], 4)
         summary = self.client.get("/api/public/summary").json()
         self.assertEqual(summary["recent_counts"], first.json()["labels"])
