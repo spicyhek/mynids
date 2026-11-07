@@ -71,6 +71,7 @@ class EventResponse(BaseModel):
     protocol: int | None
     validation_status: Literal["legacy", "classified", "unvalidated"]
     validation_reason: str | None
+    model_id: str | None = None
 
 
 class SourceCount(BaseModel):

@@ -42,6 +42,7 @@ class PredictionRow:
     packet_count: int | None = None
     payload_hash: str | None = None
     protocol: int | None = None
+    model_id: str | None = None  # The model whose label is stored; NULL on rows from before it was recorded.
 
     @property
     def validation_status(self) -> str:
@@ -165,6 +166,8 @@ class StatsStore:
                 )
             if "validation_reason" not in columns:
                 self._connection.execute("ALTER TABLE classified_events ADD COLUMN validation_reason TEXT")
+            if "model_id" not in columns:
+                self._connection.execute("ALTER TABLE classified_events ADD COLUMN model_id TEXT")
             self._connection.execute(
                 """CREATE INDEX IF NOT EXISTS idx_classified_events_unvalidated
                    ON classified_events(id) WHERE validation_status = 'unvalidated'"""
@@ -240,6 +243,35 @@ class StatsStore:
         agent_log("app/storage.py:84", "sqlite_initialize_ok", {}, hypothesis_id="H2")
         # endregion
 
+    @property
+    def labels(self) -> list[str]:
+        return list(self._labels)
+
+    def set_operational_model(self, name: str) -> None:
+        """Remember the operational model; a change is recorded so summaries can say when labels changed hands."""
+        with self._lock, self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            previous = self._connection.execute(
+                "SELECT value FROM store_metadata WHERE name = 'operational_model'").fetchone()
+            if previous is not None and previous["value"] == name:
+                return
+            self._connection.execute(
+                "INSERT INTO store_metadata VALUES ('operational_model', ?) "
+                "ON CONFLICT(name) DO UPDATE SET value = excluded.value", (name,))
+            if previous is not None:
+                self._connection.execute(
+                    "INSERT INTO store_metadata VALUES ('operational_model_changed', ?) "
+                    "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+                    (f"{previous['value']} -> {name} at {utcnow().isoformat().replace('+00:00', 'Z')}",))
+
+    def operational_model_counts(self, history_hours: int) -> dict[str, int]:
+        """Stored flows per model whose label they carry, over the window (rows from before recording: 'unrecorded')."""
+        cutoff = to_sqlite_dt(utcnow() - timedelta(hours=history_hours))
+        with self._lock:
+            return {str(row["model"]): int(row["total"]) for row in self._connection.execute(
+                """SELECT COALESCE(model_id, 'unrecorded') AS model, COUNT(*) AS total
+                   FROM classified_events WHERE observed_at >= ? GROUP BY 1 ORDER BY 2 DESC""", (cutoff,))}
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()
@@ -290,11 +322,11 @@ class StatsStore:
                 self._connection.execute(
                     """INSERT INTO classified_events
                     (source, observed_at, predicted_label, confidence, created_at, flow_id, packet_count,
-                     protocol, validation_status, validation_reason)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     protocol, validation_status, validation_reason, model_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (source, to_sqlite_dt(row.observed_at), row.predicted_label, row.confidence,
                      created_at, row.flow_id, row.packet_count, row.protocol,
-                     row.validation_status, row.validation_reason),
+                     row.validation_status, row.validation_reason, row.model_id),
                 )
                 counts[row.summary_label] += 1
                 packets += row.packet_count or 0
@@ -456,6 +488,11 @@ class StatsStore:
             provenance = self._connection.execute(
                 "SELECT value FROM store_metadata WHERE name = 'counter_provenance'"
             ).fetchone()["value"]
+            changed = self._connection.execute(
+                "SELECT value FROM store_metadata WHERE name = 'operational_model_changed'"
+            ).fetchone()
+            if changed is not None:
+                provenance = f"{provenance}; operational model changed: {changed['value']}"
 
             for row in self._connection.execute(
                 """
@@ -559,7 +596,7 @@ class StatsStore:
         with self._lock:
             rows = self._connection.execute(
                 f"""SELECT id, source, flow_id, observed_at, created_at, predicted_label,
-                    confidence, packet_count, protocol, validation_status, validation_reason
+                    confidence, packet_count, protocol, validation_status, validation_reason, model_id
                     FROM classified_events {where} ORDER BY id DESC LIMIT ?""",
                 [*params, limit],
             ).fetchall()

@@ -250,6 +250,45 @@ class LifetimeFlowTests(unittest.TestCase):
         with store._lock:
             store.check_ready()
 
+    def test_model_id_is_recorded_per_flow_and_added_to_existing_databases(self):
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            connection.executescript("""
+                CREATE TABLE classified_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL,
+                    observed_at TEXT NOT NULL, predicted_label TEXT NOT NULL,
+                    confidence REAL NOT NULL, created_at TEXT NOT NULL
+                );
+            """)
+            connection.execute(
+                "INSERT INTO classified_events (source, observed_at, predicted_label, confidence, created_at) "
+                "VALUES ('old', ?, 'BENIGN', 0.8, ?)", ((utcnow() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S"),) * 2)
+        store = StatsStore(self.db_path, labels=[*LABELS, "BRUTE_FORCE"])
+        store.initialize()
+        self.addCleanup(store.close)
+        store.record_predictions("sensor", [
+            PredictionRow(utcnow(), "BRUTE_FORCE", 0.7, "a", 2, "ha", 6, "tree:abc"),
+            PredictionRow(utcnow(), "BENIGN", 0.9, "b", 2, "hb", 6, "keras:def"),
+            PredictionRow(utcnow(), "BENIGN", 0.9, "c", 2, "hc", 6, "keras:def"),
+        ])
+        events = {event["flow_id"]: event["model_id"] for event in store.list_events()}
+        self.assertEqual(events, {"a": "tree:abc", "b": "keras:def", "c": "keras:def", None: None})
+        self.assertEqual(store.operational_model_counts(1), {"keras:def": 2, "tree:abc": 1, "unrecorded": 1})
+        self.assertEqual(self.summary(store)["recent_counts"]["BRUTE_FORCE"], 1)
+
+    def test_operational_model_change_is_recorded_once_and_reported(self):
+        store = self.open_store()
+        store.set_operational_model("cicids2018_dense_model")
+        store.set_operational_model("cicids2018_dense_model")
+        self.assertNotIn("operational model changed", self.summary(store)["counter_provenance"])
+        store.set_operational_model("nids-v6-tree-baseline-v2")
+        store.set_operational_model("nids-v6-tree-baseline-v2")
+        provenance = self.summary(store)["counter_provenance"]
+        self.assertIn("operational model changed: cicids2018_dense_model -> nids-v6-tree-baseline-v2 at ", provenance)
+        store.close()
+        reopened = self.open_store()
+        reopened.set_operational_model("nids-v6-tree-baseline-v2")
+        self.assertEqual(self.summary(reopened)["counter_provenance"], provenance)
+
 
 if __name__ == "__main__":
     unittest.main()

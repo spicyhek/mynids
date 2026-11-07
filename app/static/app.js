@@ -10,6 +10,7 @@ let summaryUnavailable = false;
 const LABEL_META = [
   { key: "BENIGN", target: "recent-benign", className: "is-benign" },
   { key: "BOTNET", target: "recent-botnet", className: "is-botnet" },
+  { key: "BRUTE_FORCE", target: "recent-brute", className: "is-brute" },
   { key: "DOS_DDOS", target: "recent-dos", className: "is-dos" },
   { key: "OTHER_ATTACK", target: "recent-other", className: "is-other" },
   { key: "UNVALIDATED", target: "recent-unvalidated", className: "is-unvalidated" },
@@ -17,6 +18,7 @@ const LABEL_META = [
 
 function formatLabelName(value) {
   if (value === "UNVALIDATED") return "unvalidated ICMPv6";
+  if (value === "BRUTE_FORCE") return "brute force";
   return String(value || "")
     .replace(/_/g, " / ")
     .toLowerCase();

@@ -35,14 +35,23 @@ class Settings:
     max_history_hours: int = int(os.getenv("NIDS_MAX_HISTORY_HOURS", "168"))
     retention_hours: int = int(os.getenv("NIDS_RETENTION_HOURS", "720"))
     default_source_name: str = os.getenv("NIDS_DEFAULT_SOURCE_NAME", "homelab-flow-bridge")
-    # Optional shadow model (zeek-conn-window-v2); its pickle loads only if the SHA-256 matches.
-    shadow_model_dir: Path | None = _optional_path_env("NIDS_SHADOW_MODEL_DIR")
-    shadow_model_sha256: str = os.getenv("NIDS_SHADOW_MODEL_SHA256", "")
+    # Optional zeek-conn-window-v2 tree bundle; its pickle loads only if the SHA-256 matches. The
+    # NIDS_SHADOW_MODEL_* names are the pre-promotion spelling and are still accepted.
+    v2_model_dir: Path | None = (_optional_path_env("NIDS_V2_MODEL_DIR")
+                                 or _optional_path_env("NIDS_SHADOW_MODEL_DIR"))
+    v2_model_sha256: str = os.getenv("NIDS_V2_MODEL_SHA256", "") or os.getenv("NIDS_SHADOW_MODEL_SHA256", "")
+    # Which model's labels are operational: "keras" (v2, if configured, runs in shadow) or "v2" (v2 labels
+    # flows it can judge, Keras labels the rest and runs in shadow on the flows v2 judged).
+    operational_model: str = os.getenv("NIDS_OPERATIONAL_MODEL", "keras").strip().lower()
 
     def __post_init__(self) -> None:
         for name in ("public_window_minutes", "stale_after_seconds", "max_history_hours", "retention_hours"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive.")
+        if self.operational_model not in ("keras", "v2"):
+            raise ValueError("NIDS_OPERATIONAL_MODEL must be 'keras' or 'v2'.")
+        if self.operational_model == "v2" and self.v2_model_dir is None:
+            raise ValueError("NIDS_OPERATIONAL_MODEL=v2 requires NIDS_V2_MODEL_DIR.")
         if self.public_window_minutes > self.retention_hours * 60:
             raise ValueError("The recent window cannot exceed retention.")
         if self.max_history_hours > self.retention_hours:

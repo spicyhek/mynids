@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import threading
@@ -39,6 +40,7 @@ class FlowClassifier:
         self._tf: Any | None = None
         self._labels: list[str] = []
         self._feature_order: list[str] = []
+        self.model_id: str | None = None
         self._load_error: str | None = None
         self._runtime_error: str | None = None
         self._lock = threading.RLock()
@@ -107,9 +109,15 @@ class FlowClassifier:
             raise ValueError("Model input dimensions disagree with feature order.")
         if len(model.output_shape) != 2 or model.output_shape[-1] != len(labels):
             raise ValueError("Model output dimensions disagree with labels.")
+        try:
+            with self._model_path.open("rb") as handle:
+                model_id = f"{self._model_path.stem}:{hashlib.file_digest(handle, 'sha256').hexdigest()[:12]}"
+        except OSError:  # A SavedModel directory has no single file to hash.
+            model_id = self._model_path.stem
         # Publish the complete, validated bundle together.
         self._np, self._tf, self._scaler, self._model = np, tf, scaler, model
         self._feature_order, self._labels = feature_order, labels
+        self.model_id = model_id
         self._load_error = None
         self._runtime_error = None
         return ModelArtifacts(labels=self.labels, feature_order=list(self._feature_order))

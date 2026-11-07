@@ -9,6 +9,7 @@
   --text-muted: #a4b5cc;
   --benign: #4ade80;
   --botnet: #ff7aa7;
+  --brute: #ff9f5a;
   --dos: #ffd166;
   --other: #b794f4;
   --unvalidated: #a4b5cc;
@@ -431,6 +432,11 @@ body::after {
   color: var(--botnet);
 }
 
+.pill.is-brute,
+.is-brute {
+  color: var(--brute);
+}
+
 .pill.is-dos,
 .is-dos {
   color: var(--dos);
@@ -514,6 +520,10 @@ body::after {
 
 .chart-segment.is-botnet {
   background: linear-gradient(90deg, #ff5f95, var(--botnet));
+}
+
+.chart-segment.is-brute {
+  background: linear-gradient(90deg, #f27a2e, var(--brute));
 }
 
 .chart-segment.is-dos {
