@@ -178,6 +178,21 @@ scp -r user@sensor-management-address:/home/user/nids-captures/SESSION-ID .\data
   --session .\data\evaluation\sessions\SESSION-ID
 ```
 
+Copy in **one** connection, as above, never one `scp` or `ssh` per file. The nids-v6 model reads many short SSH
+sessions from one host within seconds as brute force; two scripted per-file copies to the control plane have
+already raised BRUTE_FORCE false positives. Tested with Windows OpenSSH 9.5 and Git Bash OpenSSH 9.7:
+
+| Fetching several files | SSH logins |
+| --- | --- |
+| `scp -r host:/dir .` (a whole directory) | 1 |
+| `scp "host:/dir/conn.2026-11-03-*.log" .` (a remote wildcard, quoted) | 1 |
+| `ssh host "tar cf - -C /dir a b" \| tar xf -` (from Git Bash, which keeps the stream binary) | 1 |
+| `scp host:/dir/a host:/dir/b .` (one `host:` argument per file) | **one per file** |
+| `scp "host:/dir/{a,b}" .` (braces) | 1, but copies nothing |
+
+Uploading several local files to one destination (`scp a b host:/dir/`) is a single connection. Windows OpenSSH has
+no connection multiplexing (`ControlMaster`), so batching is the fix.
+
 | File | Purpose |
 | --- | --- |
 | `traffic.pcap`, `traffic.pcap1`, … | Original full-snapshot packet files |
