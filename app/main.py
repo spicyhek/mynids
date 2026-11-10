@@ -21,7 +21,8 @@ from app.alert_rules import LONE_SYN_RULE_ID, is_lone_unanswered_syn
 from app.config import settings
 from app.inference import FlowClassifier
 from app.limits import IngestBodyLimit
-from app.schemas import EventResponse, FlowBatchRequest, HealthResponse, IngestResponse, SummaryResponse
+from app.schemas import (EventResponse, FlowBatchRequest, HealthResponse, IngestResponse, SummaryResponse,
+                         WebProbeBatchRequest, WebProbeIngestResponse, WebProbeResponse)
 from app.shadow import ICMPV6_REASON, ShadowClassifier, ShadowPrediction
 from app.storage import FlowConflict, PredictionRow, StatsStore, UNVALIDATED
 
@@ -205,6 +206,7 @@ def public_summary(
         recent_window_minutes=settings.public_window_minutes,
         retention_hours=settings.retention_hours, stale_after_seconds=settings.stale_after_seconds,
         ingest_enabled=bool(settings.ingest_token), warnings=warnings,
+        web_probes=store.web_probe_summary(settings.public_window_minutes, hours),
     )
 
 
@@ -347,6 +349,32 @@ def internal_events(
     response.headers["Cache-Control"] = "no-store"
     store.purge_old_events(settings.retention_hours)
     return store.list_events(limit=limit, before_id=before_id, validation_status=validation_status)
+
+
+@app.post("/api/internal/web-probes", response_model=WebProbeIngestResponse,
+          dependencies=[Depends(require_ingest_token)])
+def ingest_web_probes(payload: WebProbeBatchRequest, store: StatsStore = Depends(get_store)) -> WebProbeIngestResponse:
+    try:
+        inserted = store.record_web_probes(payload.source, payload.events)
+    except (ValueError, OverflowError) as exc:
+        logger.exception("Web-probe storage validation failed")
+        raise HTTPException(503, "Web-probe validation failed; no events were stored.") from exc
+    return WebProbeIngestResponse(source=payload.source, received=len(payload.events), inserted=inserted,
+                                  duplicates=len(payload.events) - inserted,
+                                  event_ids=[event.event_id for event in payload.events])
+
+
+@app.get("/api/internal/web-probes", response_model=list[WebProbeResponse],
+         dependencies=[Depends(require_ingest_token)])
+def internal_web_probes(
+    response: Response,
+    hours: int = Query(default=24, ge=1, le=settings.max_history_hours),
+    limit: int = Query(default=200, ge=1, le=1000),
+    store: StatsStore = Depends(get_store),
+) -> list[dict]:
+    """Probe requests with client addresses, newest first (private: behind the ingest token)."""
+    response.headers["Cache-Control"] = "no-store"
+    return store.list_web_probes(history_hours=hours, limit=limit)
 
 
 @app.get("/api/internal/shadow/summary", dependencies=[Depends(require_ingest_token)])

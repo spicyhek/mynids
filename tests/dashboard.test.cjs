@@ -53,6 +53,17 @@ const summary = {
   warnings: [],
 };
 const ok = (data = summary) => ({ ok: true, json: async () => data });
+
+test("web probes render counts and tolerate a summary without them", async () => {
+  const probes = { recent_requests: 21, recent_clients: 1, history_requests: 976, history_clients: 20, hourly: [] };
+  const app = dashboard(async () => ok({ ...summary, web_probes: probes }));
+  await settle();
+  assert.equal(app.nodes.get("recent-web-probes").textContent, "21");
+  assert.match(app.nodes.get("web-probe-detail").textContent, /1 client ·.*976 from 20 clients/);
+  const old = dashboard(async () => ok());
+  await settle();
+  assert.equal(old.nodes.get("recent-web-probes").textContent, "—");
+});
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 test("lifetime traffic renders flows and labels the configured retention window", async () => {

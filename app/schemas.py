@@ -74,6 +74,64 @@ class EventResponse(BaseModel):
     model_id: str | None = None
 
 
+class WebProbeEvent(BaseModel):
+    """One HTTP request for a probe path (sensor/web_probes.py), from a converter reading http.log."""
+    model_config = ConfigDict(extra="forbid")
+    event_id: str = Field(min_length=1, max_length=200, pattern=r"^\S+$")
+    event_time: datetime
+    client: str = Field(max_length=64)
+    host: str = Field(max_length=255)
+    method: str = Field(max_length=16)
+    uri: str = Field(min_length=1, max_length=512)
+    status_code: int | None = Field(default=None, ge=0, le=999)
+    user_agent: str = Field(max_length=256)
+    rule: str = Field(min_length=1, max_length=64)
+
+    _validate_time = field_validator("event_time")(validate_event_time)
+
+
+class WebProbeBatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    source: str = Field(min_length=1, max_length=128)
+    events: list[WebProbeEvent] = Field(min_length=1, max_length=MAX_BATCH_SIZE)
+
+
+class WebProbeIngestResponse(BaseModel):
+    source: str
+    received: int
+    inserted: int
+    duplicates: int
+    event_ids: list[str]
+
+
+class WebProbeResponse(BaseModel):
+    source: str
+    event_id: str
+    observed_at: datetime
+    client: str
+    host: str
+    method: str
+    uri: str
+    status_code: int | None
+    user_agent: str
+    rule: str
+
+
+class WebProbeBucket(BaseModel):
+    bucket_start: datetime
+    requests: int
+    clients: int
+
+
+class WebProbeSummary(BaseModel):
+    """Counts only: client addresses never appear in the public summary."""
+    recent_requests: int
+    recent_clients: int
+    history_requests: int
+    history_clients: int
+    hourly: list[WebProbeBucket]
+
+
 class SourceCount(BaseModel):
     source: str
     total: int
@@ -115,6 +173,7 @@ class SummaryResponse(BaseModel):
     sensors: list[SensorStatus]
     ingest_enabled: bool
     warnings: list[str]
+    web_probes: WebProbeSummary
 
 
 class HealthResponse(BaseModel):

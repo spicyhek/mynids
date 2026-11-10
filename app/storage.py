@@ -150,6 +150,24 @@ class StatsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_shadow_predictions_observed
                     ON shadow_predictions(observed_at);
+                -- Web-probe requests from http.log (sensor/web_probes.py). Client addresses are private:
+                -- public summaries read counts only.
+                CREATE TABLE IF NOT EXISTS web_probe_events (
+                    source TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    client TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    method TEXT NOT NULL,
+                    uri TEXT NOT NULL,
+                    status_code INTEGER,
+                    user_agent TEXT NOT NULL,
+                    rule TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (source, event_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_web_probe_events_observed
+                    ON web_probe_events(observed_at);
                 """
             )
             self._connection.execute("BEGIN IMMEDIATE")
@@ -381,18 +399,72 @@ class StatsStore:
             batches += 1
             if count < 1000:
                 break
-        batches = 0
-        while max_batches is None or batches < max_batches:
-            with self._lock, self._connection:
-                count = self._connection.execute(
-                    """DELETE FROM shadow_predictions WHERE rowid IN
-                       (SELECT rowid FROM shadow_predictions WHERE observed_at < ? LIMIT 1000)""",
-                    (cutoff,),
-                ).rowcount
-            batches += 1
-            if count < 1000:
-                break
+        for table in ("shadow_predictions", "web_probe_events"):
+            batches = 0
+            while max_batches is None or batches < max_batches:
+                with self._lock, self._connection:
+                    count = self._connection.execute(
+                        f"""DELETE FROM {table} WHERE rowid IN
+                            (SELECT rowid FROM {table} WHERE observed_at < ? LIMIT 1000)""",
+                        (cutoff,),
+                    ).rowcount
+                batches += 1
+                if count < 1000:
+                    break
         return deleted
+
+    def record_web_probes(self, source: str, events: list) -> int:
+        """Store web-probe events (schemas.WebProbeEvent); a replayed event ID is ignored. Returns inserted."""
+        created_at = to_sqlite_dt(utcnow())
+        values = []
+        for event in events:
+            if event.event_time.tzinfo is None:
+                raise ValueError("Web-probe timestamp must include a timezone.")
+            values.append((source, event.event_id, to_sqlite_dt(event.event_time), event.client, event.host,
+                           event.method, event.uri, event.status_code, event.user_agent, event.rule, created_at))
+        with self._lock, self._connection:
+            before = self._connection.total_changes
+            self._connection.executemany(
+                "INSERT OR IGNORE INTO web_probe_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", values)
+            return self._connection.total_changes - before
+
+    def web_probe_summary(self, recent_window_minutes: int, history_hours: int) -> dict:
+        """Requests and distinct clients, recent and per hour over the history window. Counts only."""
+        now = utcnow()
+        recent_cutoff = to_sqlite_dt(now - timedelta(minutes=recent_window_minutes))
+        history_cutoff = to_sqlite_dt(now - timedelta(hours=history_hours))
+        with self._lock:
+            recent = self._connection.execute(
+                "SELECT COUNT(*) AS requests, COUNT(DISTINCT client) AS clients FROM web_probe_events "
+                "WHERE observed_at >= ?", (recent_cutoff,)).fetchone()
+            history = self._connection.execute(
+                "SELECT COUNT(*) AS requests, COUNT(DISTINCT client) AS clients FROM web_probe_events "
+                "WHERE observed_at >= ?", (history_cutoff,)).fetchone()
+            rows = self._connection.execute(
+                """SELECT strftime('%Y-%m-%d %H:00:00', observed_at) AS bucket_start,
+                          COUNT(*) AS requests, COUNT(DISTINCT client) AS clients
+                   FROM web_probe_events WHERE observed_at >= ? GROUP BY 1""", (history_cutoff,)).fetchall()
+        hourly = {from_sqlite_dt(str(row["bucket_start"])): (int(row["requests"]), int(row["clients"]))
+                  for row in rows}
+        bucket = (now - timedelta(hours=history_hours)).replace(minute=0, second=0, microsecond=0)
+        buckets = []
+        while bucket <= now:
+            requests, clients = hourly.get(bucket, (0, 0))
+            buckets.append({"bucket_start": bucket, "requests": requests, "clients": clients})
+            bucket += timedelta(hours=1)
+        return {"recent_requests": int(recent["requests"]), "recent_clients": int(recent["clients"]),
+                "history_requests": int(history["requests"]), "history_clients": int(history["clients"]),
+                "hourly": buckets}
+
+    def list_web_probes(self, *, history_hours: int, limit: int) -> list[dict]:
+        """Most recent web-probe events first, within the history window."""
+        cutoff = to_sqlite_dt(utcnow() - timedelta(hours=history_hours))
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT source, event_id, observed_at, client, host, method, uri, status_code, user_agent, rule
+                   FROM web_probe_events WHERE observed_at >= ? ORDER BY observed_at DESC LIMIT ?""",
+                (cutoff, limit)).fetchall()
+        return [{**dict(row), "observed_at": from_sqlite_dt(row["observed_at"])} for row in rows]
 
     def record_shadow_predictions(self, source: str, model_id: str, rows: list[tuple]) -> int:
         """Store (observed_at, production summary label, shadow prediction) rows; replays are ignored."""
