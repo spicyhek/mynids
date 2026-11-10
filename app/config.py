@@ -43,8 +43,12 @@ class Settings:
     # Which model's labels are operational: "keras" (v2, if configured, runs in shadow) or "v2" (v2 labels
     # flows it can judge, Keras labels the rest and runs in shadow on the flows v2 judged).
     operational_model: str = os.getenv("NIDS_OPERATIONAL_MODEL", "keras").strip().lower()
+    # v2 mode only: relabel lone unanswered SYNs BENIGN instead of alerting (app/alert_rules.py).
+    suppress_lone_unanswered_syn: str = os.getenv("NIDS_SUPPRESS_LONE_UNANSWERED_SYN", "true").strip().lower()
 
     def __post_init__(self) -> None:
+        if self.suppress_lone_unanswered_syn not in ("true", "false"):
+            raise ValueError("NIDS_SUPPRESS_LONE_UNANSWERED_SYN must be 'true' or 'false'.")
         for name in ("public_window_minutes", "stale_after_seconds", "max_history_hours", "retention_hours"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive.")

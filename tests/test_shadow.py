@@ -253,6 +253,30 @@ class OperationalV2ApiTests(unittest.TestCase):
         self.assertEqual(response.json()["labels"]["BRUTE_FORCE"], 1)
         self.assertEqual(self.client.get("/api/public/summary").json()["recent_counts"]["BRUTE_FORCE"], 1)
 
+    def test_lone_unanswered_syn_alerts_are_relabeled_benign_and_recorded(self):
+        syn = {**CONN, "conn_state": "S0", "history": "S", "orig_pkts": 1, "orig_ip_bytes": 60, "resp_pkts": 0,
+               "resp_ip_bytes": 0, "orig_bytes": 0, "resp_bytes": 0, "duration": None}
+        lone = {**v2_flow("lone"), "features_v2": Extractor().process(syn)["features"]}
+        answered = v2_flow("answered")
+        predictions = [ShadowPrediction("lone", "BOTNET", 1.0, "classified", None),
+                       ShadowPrediction("answered", "BOTNET", 0.9, "classified", None)]
+        with patch.object(self.tree, "classify", return_value=predictions), \
+                self.assertLogs("app.main", "WARNING") as logs:
+            response = self.post([lone, answered], keras_label="BENIGN")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual((response.json()["labels"]["BENIGN"], response.json()["labels"]["BOTNET"]), (1, 1))
+        self.assertIn("Suppressed BOTNET (1.000) on lone unanswered SYN lone", logs.output[0])
+        tree_id = self.tree.model_id
+        self.assertEqual(self.model_ids(), {"lone": f"{tree_id}+lone-syn-rule", "answered": tree_id})
+        summary = self.client.get("/api/internal/shadow/summary", headers=self.headers).json()
+        self.assertEqual(summary["operational_label_sources"], {f"{tree_id}+lone-syn-rule": 1, tree_id: 1})
+        # Disabled, the model's label stands.
+        with patch.object(main, "settings", replace(main.settings, suppress_lone_unanswered_syn="false")), \
+                patch.object(self.tree, "classify",
+                             return_value=[ShadowPrediction("lone2", "BOTNET", 1.0, "classified", None)]):
+            response = self.post([{**lone, "flow_id": "lone2"}], keras_label="BENIGN")
+        self.assertEqual(response.json()["labels"]["BOTNET"], 1)
+
     def test_v2_failure_falls_back_to_keras_and_degrades_health_but_not_readiness(self):
         with patch.object(self.tree, "classify", side_effect=RuntimeError("model crashed")):
             response = self.post([v2_flow("a"), v2_flow("b", port=80)])

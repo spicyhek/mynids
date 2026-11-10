@@ -221,6 +221,19 @@ Implemented locally; nothing is deployed.
   in v2 mode the Keras share is the fallback rate. The public `model_name` is the
   v2 bundle directory name, and the first start in a new mode records the change
   in `counter_provenance`, because lifetime counters span both models.
+- **Lone unanswered SYN rule** (v2 mode only; `NIDS_SUPPRESS_LONE_UNANSWERED_SYN`,
+  default `true`, set `false` to disable). A v2 attack label on a single TCP SYN
+  that got no reply (`conn_state` S0, history only `S`), from a source that is not
+  scanning or flooding in its window, is stored as BENIGN instead.
+  - Why: v2 labels these BOTNET because its BOTNET training rows are mostly malware
+    calling dead command servers. Live, they were retries to unreachable services
+    (an Ubuntu NTS server, Grafana Cloud, Cloudflare). Dropping those training rows
+    only moved the pattern to other attack classes (candidate-v6, 2026-11-10).
+  - Accepted blind spot: occasional calls to a dead command server are not alerted.
+  - Thresholds and rationale are in `app/alert_rules.py`. No homelab drill matches.
+  - Each relabeled row carries `model_id` `<v2 id>+lone-syn-rule`, so
+    `operational_label_sources` counts suppressions. The original label and
+    confidence go to the pod log as a `Suppressed …` warning.
 
 ### Shadow rollout (for the operator, through GitOps)
 
