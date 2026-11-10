@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 
+from app.alert_rules import LONE_SYN_RULE_ID, is_lone_unanswered_syn
 from app.config import settings
 from app.inference import FlowClassifier
 from app.limits import IngestBodyLimit
@@ -232,9 +233,11 @@ def ingest_flows(payload: FlowBatchRequest, store: StatsStore = Depends(get_stor
             model_id=keras_model_id(),
         ))
     decided = _v2_decisions(payload, flows) if v2_operational() else {}
+    suppressed = _apply_alert_rules(payload.source, flows, decided)
     identified_rows = [
         replace(row, predicted_label=decision.predicted_label, confidence=decision.confidence,
-                model_id=tree.model_id) if (decision := decided.get(row.flow_id)) else row
+                model_id=f"{tree.model_id}+{LONE_SYN_RULE_ID}" if row.flow_id in suppressed else tree.model_id)
+        if (decision := decided.get(row.flow_id)) else row
         for row in keras_rows
     ]
     try:
@@ -276,6 +279,28 @@ def _v2_decisions(payload: FlowBatchRequest, flows: list[dict]) -> dict[str, Sha
         return {}
     tree_runtime_error = None
     return {p.flow_id: p for p in predictions if p.validation_reason in (None, ICMPV6_REASON)}
+
+
+def _apply_alert_rules(source: str, flows: list[dict], decided: dict[str, ShadowPrediction]) -> set[str]:
+    """Relabel v2 alerts on lone unanswered SYNs BENIGN, in place; return the flow IDs changed.
+
+    The stored row keeps the model's confidence and records the rule in its model_id, so suppressed flows stay
+    countable (shadow summary's operational_label_sources) and the original label is in the log.
+    """
+    if settings.suppress_lone_unanswered_syn != "true" or not decided:
+        return set()
+    suppressed = set()
+    for flow in flows:
+        prediction = decided.get(flow["flow_id"])
+        if (prediction is None or prediction.validation_status != "classified"
+                or prediction.predicted_label == "BENIGN" or not is_lone_unanswered_syn(flow["features_v2"])):
+            continue
+        decided[flow["flow_id"]] = replace(prediction, predicted_label="BENIGN")
+        suppressed.add(flow["flow_id"])
+        # Warning level: the app configures no logging, so info lines would never reach the pod log.
+        logger.warning("Suppressed %s (%.3f) on lone unanswered SYN %s from %s", prediction.predicted_label,
+                       prediction.confidence, flow["flow_id"], source)
+    return suppressed
 
 
 def _record_keras_shadow(source: str, keras_rows: list[PredictionRow], rows: list[PredictionRow],
