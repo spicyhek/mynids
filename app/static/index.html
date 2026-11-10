@@ -105,6 +105,11 @@
               <span class="meta-label">Unvalidated ICMPv6</span>
               <strong class="stat-value is-unvalidated" id="recent-unvalidated">—</strong>
             </article>
+            <article class="stat-card">
+              <span class="meta-label">Web probe requests</span>
+              <strong class="stat-value is-other" id="recent-web-probes">—</strong>
+              <span class="meta-label" id="web-probe-detail">last 24 hours: —</span>
+            </article>
           </div>
           <p class="coverage-note">
             Model predictions are not confirmed incidents. New ICMPv6 flows are counted as unvalidated:
@@ -133,6 +138,12 @@
                 Model predictions for a combined class covering infiltration, port scans, XSS and SQL injection.
                 Flows labeled by the earlier model also count brute force here.
               </p>
+            </div>
+            <div class="class-guide-item">
+              <span class="meta-label">Web Probes</span>
+              <p>HTTP requests for paths only scanners ask for, such as <code>.env</code>, <code>.git</code>,
+                WordPress or PHP files. Detected from request paths, not by the model, and counted separately
+                from flows.</p>
             </div>
             <div class="class-guide-item">
               <span class="meta-label">Unvalidated ICMPv6</span>
@@ -184,6 +195,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=icmpv6-status-1"></script>
+    <script src="/static/app.js?v=web-probes-1"></script>
   </body>
 </html>

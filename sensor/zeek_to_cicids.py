@@ -12,7 +12,7 @@ import random
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib import error, request
 
 if __package__ in (None, ""):
@@ -79,6 +79,14 @@ def parse_args() -> argparse.Namespace:
         "--features-v2", action="store_true",
         default=os.getenv("NIDS_EXPORT_FEATURES_V2", "").lower() in ("1", "true", "yes"),
         help="Also send zeek-conn-window-v2 features for shadow evaluation (upgrade the server first).",
+    )
+    parser.add_argument(
+        "--http-log-path", default=os.getenv("NIDS_HTTP_LOG_PATH") or None,
+        help="Zeek http.log to scan for web probes (upgrade the server first); off when unset.",
+    )
+    parser.add_argument(
+        "--web-probe-endpoint", default=os.getenv("NIDS_WEB_PROBE_ENDPOINT") or None,
+        help="Web-probe ingestion endpoint; defaults to web-probes beside --endpoint.",
     )
     return parser.parse_args()
 
@@ -480,7 +488,15 @@ def anchor(handle: Any, offset: int) -> str:
 
 def export_log_once(*, log_path: Path, endpoint: str, state_file: Path,
                     source_name: str, token: str, batch_size: int,
-                    features_v2: FeatureV2Stream | None = None) -> int:
+                    features_v2: FeatureV2Stream | None = None,
+                    convert: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+                    send: Callable[[str, str, str, list[dict], Path], int] | None = None) -> int:
+    """Export new complete records from a Zeek JSON log, with a durable checkpoint and pending batch.
+
+    By default records are conn.log flows. `convert` (record -> item, or None to skip) and `send`
+    (deliver-shaped) let another log reuse the same rotation, checkpoint and spool handling.
+    """
+    send = send or deliver
     if not 1 <= batch_size <= MAX_BATCH_SIZE:
         raise ValueError(f"batch_size must be between 1 and {MAX_BATCH_SIZE}")
     spool = state_file.with_suffix(state_file.suffix + ".pending.json")
@@ -491,7 +507,7 @@ def export_log_once(*, log_path: Path, endpoint: str, state_file: Path,
         pending = json.loads(spool.read_text(encoding="utf-8"))
         if pending["source"] != source_name or pending["endpoint"] != endpoint:
             raise ValueError("Pending batch belongs to a different source/endpoint; restore its configuration first.")
-        exported += deliver(endpoint, token, source_name, pending["flows"], state_file)
+        exported += send(endpoint, token, source_name, pending["flows"], state_file)
         atomic_json(state_file, pending["checkpoint"])
         spool.unlink()
 
@@ -557,7 +573,11 @@ def export_log_once(*, log_path: Path, endpoint: str, state_file: Path,
             offset = handle.tell()
             try:
                 parsed = parse_zeek_json_line(line.decode("utf-8"))
-                if parsed is not None:
+                if parsed is not None and convert is not None:
+                    item = convert(parsed)
+                    if item is not None:
+                        flows.append(item)
+                elif parsed is not None:
                     # v2 sees every valid record first, as offline preparation does, even one v1 rejects.
                     v2 = features_v2.process(identity, offset, parsed) if features_v2 is not None else None
                     if is_decoded_tunnel_carrier(parsed):
@@ -587,6 +607,19 @@ def main() -> int:
         return 2
     failures = 0
     stream = FeatureV2Stream() if args.features_v2 else None
+    probes = None
+    if args.http_log_path:
+        from sensor.web_probes import deliver_probes, probe_event, web_probe_endpoint
+
+        try:
+            probe_endpoint = args.web_probe_endpoint or web_probe_endpoint(args.endpoint)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        # Its own checkpoint, so a probe-path failure never holds back flows (and the reverse).
+        probes = dict(log_path=Path(args.http_log_path), endpoint=probe_endpoint,
+                      state_file=Path(args.state_file + ".http"), source_name=source_name, token=args.token,
+                      batch_size=args.batch_size, convert=probe_event, send=deliver_probes)
     while True:
         try:
             exported = export_log_once(
@@ -599,6 +632,13 @@ def main() -> int:
         except (OSError, ValueError, error.URLError) as exc:
             failures += 1
             print(f"Export failed; checkpoint/pending batch retained: {exc}", file=sys.stderr, flush=True)
+        if probes is not None:
+            try:
+                if found := export_log_once(**probes):
+                    print(f"Acknowledged {found} web probe(s).", flush=True)
+            except (OSError, ValueError, error.URLError) as exc:
+                print(f"Web-probe export failed; checkpoint/pending batch retained: {exc}",
+                      file=sys.stderr, flush=True)
         delay = min(60.0, args.poll_seconds * 2 ** min(failures, 6))
         time.sleep(delay + (random.uniform(0, delay * 0.1) if failures else 0))
 

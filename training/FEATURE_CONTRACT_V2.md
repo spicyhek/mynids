@@ -234,6 +234,25 @@ Implemented locally; nothing is deployed.
   - Each relabeled row carries `model_id` `<v2 id>+lone-syn-rule`, so
     `operational_label_sources` counts suppressions. The original label and
     confidence go to the pod log as a `Suppressed …` warning.
+- **Web probes** (`--http-log-path` or `NIDS_HTTP_LOG_PATH`, off when unset;
+  `NIDS_WEB_PROBE_ENDPOINT` defaults to `web-probes` beside the flow endpoint).
+  The converter also tails Zeek's `http.log`, with its own checkpoint
+  (`<state file>.http`), pending batch and rotation handling, in the same loop.
+  - It is a request-path rule, not the model (`sensor/web_probes.py`): any
+    request for a probe path (`.env`, `.git`, `.aws`, WordPress, PHP, admin
+    panels, backups) becomes an event. A proxy pools scanner requests into
+    connections shared with real visitors, so the flow model cannot isolate them.
+  - Events go to `POST /api/internal/web-probes`. They are stored apart from
+    flows and expire with retention. The client is the right-most forwarded
+    address.
+  - `GET /api/internal/web-probes` (token) lists events with clients. The public
+    summary's `web_probes` block and the dashboard show counts only.
+  - On 70 h of live traffic it flagged 1,023 requests from 28 clients. It caught
+    all 20 labeled probe connections in live-regression-v1 (the model: 4) and
+    none of its benign connections.
+  - Rollout: deploy the server first. Then set `NIDS_HTTP_LOG_PATH=/zeek-logs/http.log`
+    on the converter. Until the server has the endpoint, probe batches wait in
+    their pending file and flows are unaffected.
 
 ### Shadow rollout (for the operator, through GitOps)
 

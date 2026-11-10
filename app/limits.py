@@ -8,7 +8,7 @@ class IngestBodyLimit:
         self.max_bytes = max_bytes
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope["path"] != "/api/internal/flows":
+        if scope["type"] != "http" or scope["path"] not in ("/api/internal/flows", "/api/internal/web-probes"):
             return await self.app(scope, receive, send)
         chunks = []
         size = 0

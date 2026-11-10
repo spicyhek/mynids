@@ -187,6 +187,22 @@ function renderHourlyChart(hourly) {
   });
 }
 
+function renderWebProbes(probes, recentWindowMinutes) {
+  // Optional block: counts only (client addresses never reach the public summary).
+  const count = (value) => Number.isSafeInteger(value) && value >= 0;
+  if (!probes || !["recent_requests", "recent_clients", "history_requests", "history_clients"]
+    .every((key) => count(probes[key]))) {
+    setText("recent-web-probes", "—");
+    setText("web-probe-detail", "last 24 hours: —");
+    return;
+  }
+  const clients = (n) => `${formatNumber(n)} client${n === 1 ? "" : "s"}`;
+  setText("recent-web-probes", formatNumber(probes.recent_requests));
+  setText("web-probe-detail",
+    `last ${recentWindowMinutes} min: ${clients(probes.recent_clients)} · last ${HOURS} hours: `
+    + `${formatNumber(probes.history_requests)} from ${clients(probes.history_clients)}`);
+}
+
 async function loadSummary() {
   const controller = new AbortController();
   let timer;
@@ -263,6 +279,7 @@ async function refresh() {
     renderLabelList(data.retained_counts, data.recent_counts);
     renderWarnings(data.warnings || []);
     renderHourlyChart(data.hourly || []);
+    renderWebProbes(data.web_probes, data.recent_window_minutes);
     hasLoadedSummary = true;
     renderActivityStatus();
   } catch (error) {
