@@ -17,7 +17,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 
-from app.alert_rules import LONE_SYN_RULE_ID, is_lone_unanswered_syn
+from app.alert_rules import (BOTNET_REASON, LONE_SYN_RULE_ID, NO_V2_FEATURES_REASON, V2_UNAVAILABLE_REASON,
+                             is_lone_unanswered_syn)
 from app.config import settings
 from app.inference import FlowClassifier
 from app.limits import IngestBodyLimit
@@ -136,7 +137,9 @@ def get_warnings() -> list[str]:
     if not classifier.loaded or classifier.load_error:
         warnings.append("Model inference is unavailable or degraded.")
     if v2_unavailable():
-        warnings.append("The operational v2 model is unavailable; flows are labeled by the Keras fallback model.")
+        warnings.append("The operational v2 model is unavailable; flows are stored as unvalidated until it recovers."
+                        if settings.v2_undecided == "unvalidated" else
+                        "The operational v2 model is unavailable; flows are labeled by the Keras fallback model.")
     if not settings.ingest_token:
         warnings.append("Internal ingestion is disabled until NIDS_INGEST_TOKEN is configured.")
     return warnings
@@ -172,7 +175,7 @@ def healthz() -> HealthResponse:
 def readyz(response: Response, store: StatsStore = Depends(get_store)) -> HealthResponse:
     health = healthz()
     # Ingestion needs Keras and storage. An unavailable v2 model degrades health but keeps the pod ready,
-    # because its flows fall back to Keras rather than failing.
+    # because its flows are stored as unvalidated (or, with NIDS_V2_UNDECIDED=keras, Keras-labeled) rather than failing.
     ready = classifier.loaded and not classifier.load_error
     try:
         store.check_ready()
@@ -200,7 +203,9 @@ def public_summary(
     if not summary["packet_counts_complete"]:
         warnings.append("Retained packet totals exclude historical flows without packet counts.")
     if summary["recent_counts"][UNVALIDATED]:
-        warnings.append("ICMPv6 traffic is unvalidated and is counted separately from benign and attack predictions.")
+        warnings.append("Unvalidated flows (ICMPv6, botnet predictions, and flows the model could not judge, such as "
+                        "the first minute after a sensor restart) are counted separately from benign and attack "
+                        "predictions.")
     return SummaryResponse(
         **summary, model_name=operational_model_name(),
         recent_window_minutes=settings.public_window_minutes,
@@ -236,12 +241,21 @@ def ingest_flows(payload: FlowBatchRequest, store: StatsStore = Depends(get_stor
         ))
     decided = _v2_decisions(payload, flows) if v2_operational() else {}
     suppressed = _apply_alert_rules(payload.source, flows, decided)
-    identified_rows = [
-        replace(row, predicted_label=decision.predicted_label, confidence=decision.confidence,
-                model_id=f"{tree.model_id}+{LONE_SYN_RULE_ID}" if row.flow_id in suppressed else tree.model_id)
-        if (decision := decided.get(row.flow_id)) else row
-        for row in keras_rows
-    ]
+    _demote_botnet(decided)  # After the lone-SYN rule, which only relabels classified predictions.
+    undecided = _undecided_reasons(flows, decided)
+    identified_rows = []
+    for row in keras_rows:
+        decision = decided.get(row.flow_id)
+        if decision is not None:
+            identified_rows.append(replace(
+                row, predicted_label=decision.predicted_label, confidence=decision.confidence,
+                model_id=f"{tree.model_id}+{LONE_SYN_RULE_ID}" if row.flow_id in suppressed else tree.model_id,
+                unvalidated_reason=decision.validation_reason if decision.validation_status == "unvalidated" else None))
+        elif row.flow_id in undecided:
+            # The Keras label is kept for reference but no longer counts as a prediction.
+            identified_rows.append(replace(row, unvalidated_reason=undecided[row.flow_id]))
+        else:
+            identified_rows.append(row)
     try:
         counts = store.record_predictions(payload.source, identified_rows)
     except FlowConflict as exc:
@@ -264,10 +278,11 @@ def ingest_flows(payload: FlowBatchRequest, store: StatsStore = Depends(get_stor
 
 
 def _v2_decisions(payload: FlowBatchRequest, flows: list[dict]) -> dict[str, ShadowPrediction]:
-    """v2 predictions that become operational labels, by flow ID. Any flow left out keeps its Keras label.
+    """v2 predictions that become operational labels, by flow ID. Flows left out are undecided: stored as
+    unvalidated (_undecided_reasons), or Keras-labeled with NIDS_V2_UNDECIDED=keras.
 
     v2 decides flows with a warm, undegraded window; ICMPv6 is included because both models' ICMPv6
-    output is stored as unvalidated. If v2 cannot run, the whole batch keeps Keras and health degrades.
+    output is stored as unvalidated. If v2 cannot run, the whole batch is undecided and health degrades.
     """
     global tree_runtime_error
     if tree is None or not any(flow.get("features_v2") is not None for flow in flows):
@@ -281,6 +296,34 @@ def _v2_decisions(payload: FlowBatchRequest, flows: list[dict]) -> dict[str, Sha
         return {}
     tree_runtime_error = None
     return {p.flow_id: p for p in predictions if p.validation_reason in (None, ICMPV6_REASON)}
+
+
+def _demote_botnet(decided: dict[str, ShadowPrediction]) -> None:
+    """Store v2 BOTNET predictions as unvalidated, in place (alert_rules.BOTNET_REASON explains why)."""
+    if settings.botnet_alerts != "unvalidated":
+        return
+    for flow_id, prediction in decided.items():
+        if prediction.validation_status == "classified" and prediction.predicted_label == "BOTNET":
+            decided[flow_id] = replace(prediction, validation_status="unvalidated", validation_reason=BOTNET_REASON)
+
+
+def _undecided_reasons(flows: list[dict], decided: dict[str, ShadowPrediction]) -> dict[str, str]:
+    """In v2 mode, why each flow v2 did not judge is unvalidated; empty when undecided flows keep Keras labels."""
+    if not v2_operational() or settings.v2_undecided != "unvalidated":
+        return {}
+    reasons = {}
+    for flow in flows:
+        if flow["flow_id"] in decided:
+            continue
+        if flow.get("features_v2") is None:
+            reasons[flow["flow_id"]] = NO_V2_FEATURES_REASON
+        elif flow.get("window_degraded"):
+            reasons[flow["flow_id"]] = "window_degraded"
+        elif not flow.get("window_warm"):
+            reasons[flow["flow_id"]] = "window_not_warm"
+        else:
+            reasons[flow["flow_id"]] = V2_UNAVAILABLE_REASON  # v2 failed or rejected this batch.
+    return reasons
 
 
 def _apply_alert_rules(source: str, flows: list[dict], decided: dict[str, ShadowPrediction]) -> set[str]:

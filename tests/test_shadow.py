@@ -216,14 +216,29 @@ class OperationalV2ApiTests(unittest.TestCase):
         events = self.client.get("/api/internal/events", headers=self.headers).json()
         return {event["flow_id"]: event["model_id"] for event in events}
 
-    def test_v2_labels_judged_flows_and_keras_labels_the_rest(self):
+    def judged_and_undecided_flows(self):
         v1_only = {k: v for k, v in v2_flow("v1-only").items() if k in ("flow_id", "event_time", "features")}
-        flows = [v2_flow("ok"), v2_flow("dos", port=80), v2_flow("cold", warm=False),
-                 v2_flow("lossy", warm=False, degraded=True), v2_flow("icmp6", protocol=58), v1_only]
-        response = self.post(flows)
-        self.assertEqual(response.status_code, 200, response.text)
+        return [v2_flow("ok"), v2_flow("dos", port=80), v2_flow("cold", warm=False),
+                v2_flow("lossy", warm=False, degraded=True), v2_flow("icmp6", protocol=58), v1_only]
+
+    def test_undecided_flows_keep_keras_labels_when_configured(self):
+        with patch.object(main, "settings", replace(main.settings, v2_undecided="keras")):
+            response = self.post(self.judged_and_undecided_flows())
         self.assertEqual(response.json()["labels"], {"BENIGN": 1, "BOTNET": 0, "BRUTE_FORCE": 0, "DOS_DDOS": 1,
                                                      "OTHER_ATTACK": 3, "UNVALIDATED": 1})
+
+    def test_v2_labels_judged_flows_and_undecided_flows_are_unvalidated(self):
+        flows = self.judged_and_undecided_flows()
+        response = self.post(flows)
+        self.assertEqual(response.status_code, 200, response.text)
+        # Keras's OTHER_ATTACK on the cold, degraded and v1-only flows no longer counts as an attack.
+        self.assertEqual(response.json()["labels"], {"BENIGN": 1, "BOTNET": 0, "BRUTE_FORCE": 0, "DOS_DDOS": 1,
+                                                     "OTHER_ATTACK": 0, "UNVALIDATED": 4})
+        events = {e["flow_id"]: e for e in self.client.get("/api/internal/events", headers=self.headers).json()}
+        self.assertEqual({fid: events[fid]["validation_reason"] for fid in ("cold", "lossy", "v1-only", "icmp6")},
+                         {"cold": "window_not_warm", "lossy": "window_degraded", "v1-only": "no_v2_features",
+                          "icmp6": "icmpv6_detection_not_validated"})
+        self.assertEqual(events["cold"]["predicted_label"], "OTHER_ATTACK")  # Keras's label kept for reference.
         tree_id = self.tree.model_id
         self.assertEqual(self.model_ids(), {"ok": tree_id, "dos": tree_id, "icmp6": tree_id,
                                             "cold": self.KERAS_ID, "lossy": self.KERAS_ID,
@@ -260,6 +275,8 @@ class OperationalV2ApiTests(unittest.TestCase):
         answered = v2_flow("answered")
         predictions = [ShadowPrediction("lone", "BOTNET", 1.0, "classified", None),
                        ShadowPrediction("answered", "BOTNET", 0.9, "classified", None)]
+        # BOTNET alerting on, so this test isolates the lone-SYN rule (BOTNET demotion is tested separately).
+        self.enterContext(patch.object(main, "settings", replace(main.settings, botnet_alerts="alert")))
         with patch.object(self.tree, "classify", return_value=predictions), \
                 self.assertLogs("app.main", "WARNING") as logs:
             response = self.post([lone, answered], keras_label="BENIGN")
@@ -277,18 +294,43 @@ class OperationalV2ApiTests(unittest.TestCase):
             response = self.post([{**lone, "flow_id": "lone2"}], keras_label="BENIGN")
         self.assertEqual(response.json()["labels"]["BOTNET"], 1)
 
-    def test_v2_failure_falls_back_to_keras_and_degrades_health_but_not_readiness(self):
+    def test_botnet_predictions_are_unvalidated_and_lone_syns_still_benign(self):
+        syn = {**CONN, "conn_state": "S0", "history": "S", "orig_pkts": 1, "orig_ip_bytes": 60, "resp_pkts": 0,
+               "resp_ip_bytes": 0, "orig_bytes": 0, "resp_bytes": 0, "duration": None}
+        lone = {**v2_flow("lone"), "features_v2": Extractor().process(syn)["features"]}
+        predictions = [ShadowPrediction("lone", "BOTNET", 1.0, "classified", None),
+                       ShadowPrediction("poll", "BOTNET", 0.97, "classified", None),
+                       ShadowPrediction("bf", "BRUTE_FORCE", 0.9, "classified", None)]
+        with patch.object(self.tree, "classify", return_value=predictions), self.assertLogs("app.main", "WARNING"):
+            response = self.post([lone, v2_flow("poll"), v2_flow("bf")], keras_label="BENIGN")
+        self.assertEqual(response.status_code, 200, response.text)
+        labels = response.json()["labels"]
+        self.assertEqual((labels["BENIGN"], labels["BOTNET"], labels["BRUTE_FORCE"], labels["UNVALIDATED"]),
+                         (1, 0, 1, 1))
+        events = {e["flow_id"]: e for e in self.client.get("/api/internal/events", headers=self.headers).json()}
+        poll = events["poll"]
+        self.assertEqual((poll["predicted_label"], poll["validation_status"], poll["validation_reason"],
+                          poll["model_id"]),
+                         ("BOTNET", "unvalidated", "botnet_detection_not_validated", self.tree.model_id))
+        self.assertEqual(events["lone"]["model_id"], f"{self.tree.model_id}+lone-syn-rule")
+        # With BOTNET alerting configured, the label counts as an attack again.
+        with patch.object(main, "settings", replace(main.settings, botnet_alerts="alert")), \
+                patch.object(self.tree, "classify",
+                             return_value=[ShadowPrediction("poll2", "BOTNET", 0.97, "classified", None)]):
+            self.assertEqual(self.post([v2_flow("poll2")], keras_label="BENIGN").json()["labels"]["BOTNET"], 1)
+
+    def test_v2_failure_stores_unvalidated_and_degrades_health_but_not_readiness(self):
         with patch.object(self.tree, "classify", side_effect=RuntimeError("model crashed")):
             response = self.post([v2_flow("a"), v2_flow("b", port=80)])
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["labels"]["OTHER_ATTACK"], 2)
+        self.assertEqual((response.json()["labels"]["OTHER_ATTACK"], response.json()["labels"]["UNVALIDATED"]), (0, 2))
         self.assertEqual(set(self.model_ids().values()), {self.KERAS_ID})
         health = self.client.get("/healthz").json()
         self.assertEqual(health["status"], "degraded")
-        self.assertTrue(any("Keras fallback" in warning for warning in health["warnings"]))
+        self.assertTrue(any("stored as unvalidated" in warning for warning in health["warnings"]))
         self.assertEqual(self.client.get("/readyz").status_code, 200)
         public = self.client.get("/api/public/summary").json()
-        self.assertTrue(any("Keras fallback" in warning for warning in public["warnings"]))
+        self.assertTrue(any("stored as unvalidated" in warning for warning in public["warnings"]))
         summary = self.client.get("/api/internal/shadow/summary", headers=self.headers).json()
         self.assertEqual(summary["models"], {})  # Nothing to compare when v2 labeled nothing.
         # The next good batch restores v2 labels and health.

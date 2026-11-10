@@ -17,7 +17,7 @@ const LABEL_META = [
 ];
 
 function formatLabelName(value) {
-  if (value === "UNVALIDATED") return "unvalidated ICMPv6";
+  if (value === "UNVALIDATED") return "unvalidated";
   if (value === "BRUTE_FORCE") return "brute force";
   return String(value || "")
     .replace(/_/g, " / ")

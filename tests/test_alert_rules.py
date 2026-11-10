@@ -57,6 +57,13 @@ class LoneUnansweredSynTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "NIDS_SUPPRESS_LONE_UNANSWERED_SYN"):
             replace(Settings(), suppress_lone_unanswered_syn="yes")
 
+    def test_undecided_and_botnet_settings_are_validated(self):
+        with self.assertRaisesRegex(ValueError, "NIDS_V2_UNDECIDED"):
+            replace(Settings(), v2_undecided="drop")
+        with self.assertRaisesRegex(ValueError, "NIDS_BOTNET_ALERTS"):
+            replace(Settings(), botnet_alerts="off")
+        self.assertEqual((Settings().v2_undecided, Settings().botnet_alerts), ("unvalidated", "unvalidated"))
+
 
 if __name__ == "__main__":
     unittest.main()

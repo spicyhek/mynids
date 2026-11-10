@@ -20,6 +20,15 @@ from __future__ import annotations
 from typing import Mapping
 
 LONE_SYN_RULE_ID = "lone-syn-rule"
+
+# BOTNET predictions are recorded but not counted as attacks. BOTNET detection is family-specific (every held-out
+# botnet group scored 0), the homelab has no botnet ground truth, and every BOTNET alert so far was benign: lone
+# unanswered SYNs live, and regular small HTTP GETs to :8080 in the 2026-11-10 held-out test (30 of 46 benign false
+# alarms), which look like the Ares C2 polls in its training data.
+BOTNET_REASON = "botnet_detection_not_validated"
+# Why v2 could not judge a flow in v2 mode (stored as unvalidated rather than taking the Keras fallback label).
+NO_V2_FEATURES_REASON = "no_v2_features"
+V2_UNAVAILABLE_REASON = "v2_unavailable"
 MAX_SAME_SERVICE_CONNS = 10
 MAX_DISTINCT_DST_HOSTS = 20
 MAX_DISTINCT_DST_PORTS = 5
