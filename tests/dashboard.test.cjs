@@ -177,7 +177,7 @@ test("invalid summary data never replaces the last valid display", async () => {
   }
 });
 
-test("unvalidated ICMPv6 has a separate counter, label row and hourly segment", async () => {
+test("unvalidated flows have a separate counter, label row and hourly segment", async () => {
   const counts = { BENIGN: 0, BOTNET: 0, BRUTE_FORCE: 0, DOS_DDOS: 0, OTHER_ATTACK: 0, UNVALIDATED: 10 };
   const app = dashboard(async () => ok({ ...summary, retained_counts: counts, recent_counts: counts,
     hourly: [{ bucket_start: summary.generated_at, counts }] }));
@@ -188,7 +188,7 @@ test("unvalidated ICMPv6 has a separate counter, label row and hourly segment", 
   assert.equal(app.nodes.get("total-events").textContent, "10");
   const labels = app.nodes.get("label-list").children;
   assert.equal(labels.length, 6);
-  assert.match(labels.at(-1).innerHTML, /unvalidated ICMPv6/);
+  assert.match(labels.at(-1).innerHTML, /unvalidated/);
   const chart = app.nodes.get("hourly-chart").children[0].innerHTML;
   assert.match(chart, /is-unvalidated/);
   assert.doesNotMatch(chart, /is-dos/);

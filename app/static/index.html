@@ -102,7 +102,7 @@
               <strong class="stat-value is-other" id="recent-other">—</strong>
             </article>
             <article class="stat-card">
-              <span class="meta-label">Unvalidated ICMPv6</span>
+              <span class="meta-label">Unvalidated</span>
               <strong class="stat-value is-unvalidated" id="recent-unvalidated">—</strong>
             </article>
             <article class="stat-card">
@@ -112,8 +112,8 @@
             </article>
           </div>
           <p class="coverage-note">
-            Model predictions are not confirmed incidents. New ICMPv6 flows are counted as unvalidated:
-            detection accuracy for this traffic has not been established. Earlier records retain their original labels.
+            Model predictions are not confirmed incidents. Flows whose detection accuracy has not been established
+            are counted as unvalidated instead of benign or attack. Earlier records retain their original labels.
           </p>
           <div class="class-guide" aria-label="Classification descriptions">
             <div class="class-guide-item">
@@ -122,7 +122,8 @@
             </div>
             <div class="class-guide-item">
               <span class="meta-label">Botnet</span>
-              <p>Traffic the model predicts resembles activity from compromised machines.</p>
+              <p>Traffic the model predicts resembles activity from compromised machines. Since November 10, 2026
+                new botnet predictions are counted as unvalidated: they have only matched benign traffic here.</p>
             </div>
             <div class="class-guide-item">
               <span class="meta-label">Brute Force</span>
@@ -146,9 +147,10 @@
                 from flows.</p>
             </div>
             <div class="class-guide-item">
-              <span class="meta-label">Unvalidated ICMPv6</span>
-              <p>Observed IPv6 control traffic with unverified detection quality. Included in flow totals,
-                but counted separately from benign and suspected attacks.</p>
+              <span class="meta-label">Unvalidated</span>
+              <p>Flows with unverified detection quality: IPv6 control traffic (ICMPv6), botnet predictions, and
+                flows the model could not judge, such as the first minute after a sensor restart. Included in flow
+                totals, but counted separately from benign and suspected attacks.</p>
             </div>
           </div>
         </section>
@@ -173,7 +175,7 @@
               <span class="pill is-brute">brute force</span>
               <span class="pill is-dos">dos / ddos</span>
               <span class="pill is-other">other attack</span>
-              <span class="pill is-unvalidated">unvalidated ICMPv6</span>
+              <span class="pill is-unvalidated">unvalidated</span>
             </div>
             <div class="chart" id="hourly-chart" aria-label="Hourly classified activity"></div>
           </article>
@@ -195,6 +197,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=web-probes-1"></script>
+    <script src="/static/app.js?v=unvalidated-2"></script>
   </body>
 </html>

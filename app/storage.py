@@ -43,14 +43,16 @@ class PredictionRow:
     payload_hash: str | None = None
     protocol: int | None = None
     model_id: str | None = None  # The model whose label is stored; NULL on rows from before it was recorded.
+    # Why a non-ICMPv6 row is unvalidated (e.g. a cold window, or a BOTNET prediction); None means classified.
+    unvalidated_reason: str | None = None
 
     @property
     def validation_status(self) -> str:
-        return "unvalidated" if self.protocol == 58 else "classified"
+        return "unvalidated" if self.protocol == 58 or self.unvalidated_reason else "classified"
 
     @property
     def validation_reason(self) -> str | None:
-        return ICMPV6_REASON if self.protocol == 58 else None
+        return ICMPV6_REASON if self.protocol == 58 else self.unvalidated_reason
 
     @property
     def summary_label(self) -> str:

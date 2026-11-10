@@ -45,10 +45,19 @@ class Settings:
     operational_model: str = os.getenv("NIDS_OPERATIONAL_MODEL", "keras").strip().lower()
     # v2 mode only: relabel lone unanswered SYNs BENIGN instead of alerting (app/alert_rules.py).
     suppress_lone_unanswered_syn: str = os.getenv("NIDS_SUPPRESS_LONE_UNANSWERED_SYN", "true").strip().lower()
+    # v2 mode only: flows v2 cannot judge (cold or degraded window, no v2 features, v2 failing) are stored as
+    # "unvalidated" with the reason, or keep the Keras fallback label with "keras".
+    v2_undecided: str = os.getenv("NIDS_V2_UNDECIDED", "unvalidated").strip().lower()
+    # v2 mode only: BOTNET predictions are stored as "unvalidated" (botnet_detection_not_validated), or "alert".
+    botnet_alerts: str = os.getenv("NIDS_BOTNET_ALERTS", "unvalidated").strip().lower()
 
     def __post_init__(self) -> None:
         if self.suppress_lone_unanswered_syn not in ("true", "false"):
             raise ValueError("NIDS_SUPPRESS_LONE_UNANSWERED_SYN must be 'true' or 'false'.")
+        if self.v2_undecided not in ("unvalidated", "keras"):
+            raise ValueError("NIDS_V2_UNDECIDED must be 'unvalidated' or 'keras'.")
+        if self.botnet_alerts not in ("unvalidated", "alert"):
+            raise ValueError("NIDS_BOTNET_ALERTS must be 'unvalidated' or 'alert'.")
         for name in ("public_window_minutes", "stale_after_seconds", "max_history_hours", "retention_hours"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive.")

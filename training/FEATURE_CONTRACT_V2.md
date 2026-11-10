@@ -234,6 +234,26 @@ Implemented locally; nothing is deployed.
   - Each relabeled row carries `model_id` `<v2 id>+lone-syn-rule`, so
     `operational_label_sources` counts suppressions. The original label and
     confidence go to the pod log as a `Suppressed …` warning.
+- **Undecided flows are unvalidated** (v2 mode only; `NIDS_V2_UNDECIDED`, default
+  `unvalidated`, or `keras` for the old fallback). A flow v2 does not judge is
+  stored unvalidated with its reason, instead of taking the Keras label:
+  `window_not_warm`, `window_degraded`, `no_v2_features`, or `v2_unavailable`
+  (v2 failed or rejected the batch). Keras's label stays in the row for reference.
+  - Why: in the 2026-11-10 held-out test, Keras raised 9 of the 46 benign false
+    alarms on cold windows. Live, Keras raised about 2,000 false alerts a day.
+  - Cost: the first minute after a sensor restart produces no attack labels.
+- **BOTNET is unvalidated** (v2 mode only; `NIDS_BOTNET_ALERTS`, default
+  `unvalidated`, or `alert`). A v2 BOTNET prediction is stored unvalidated with
+  reason `botnet_detection_not_validated`, keeping the label and `model_id`. It
+  runs after the lone-SYN rule, so lone SYNs still become BENIGN.
+  - Why: BOTNET detection is family-specific (every held-out botnet group scored
+    0), the homelab has no botnet ground truth, and every BOTNET label so far was
+    benign. In the held-out test it flagged 30 regular benign HTTP GETs to :8080,
+    which resemble the Ares C2 polls in its training data.
+- Recomputed from the held-out session's preserved predictions (post hoc, the
+  session is spent): the two settings together take benign false alarms from
+  46/71 to 7/71, all of them successful SSH logins, and attack detection from
+  951/956 to 950/956. A new held-out session must confirm this.
 - **Web probes** (`--http-log-path` or `NIDS_HTTP_LOG_PATH`, off when unset;
   `NIDS_WEB_PROBE_ENDPOINT` defaults to `web-probes` beside the flow endpoint).
   The converter also tails Zeek's `http.log`, with its own checkpoint
