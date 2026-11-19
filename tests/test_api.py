@@ -184,5 +184,41 @@ class SummaryApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 413)
 
 
+class ReleaseHeaderTests(unittest.TestCase):
+    """mybuilds checks X-Release-ID on /healthz through Cloudflare, so the header must be fresh."""
+
+    def client_with(self, release_id: str) -> TestClient:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        settings = replace(main.settings, db_path=Path(temp_dir.name) / "nids.sqlite3",
+                           ingest_token="test-token", release_id=release_id)
+        self.enterContext(patch.object(main, "settings", settings))
+        self.enterContext(patch.object(main.classifier, "load", return_value=ModelArtifacts(LABELS, [])))
+        return self.enterContext(TestClient(main.app))
+
+    def test_healthz_carries_the_release_id_and_is_never_cached(self) -> None:
+        client = self.client_with("mynids/0123456/production/57")
+        response = client.get("/healthz")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["x-release-id"], "mynids/0123456/production/57")
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        # The body is unchanged: mybuilds reads its status field.
+        self.assertIn(response.json()["status"], ("ok", "degraded"))
+
+    def test_only_healthz_gets_the_headers(self) -> None:
+        client = self.client_with("mynids/0123456/production/57")
+        # /readyz calls healthz() directly but is not mybuilds' check.
+        readyz = client.get("/readyz")
+        self.assertNotIn("x-release-id", readyz.headers)
+        summary = client.get("/api/public/summary")
+        self.assertNotIn("x-release-id", summary.headers)
+
+    def test_unset_release_id_leaves_the_header_out(self) -> None:
+        client = self.client_with("")
+        response = client.get("/healthz")
+        self.assertNotIn("x-release-id", response.headers)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+
+
 if __name__ == "__main__":
     unittest.main()
