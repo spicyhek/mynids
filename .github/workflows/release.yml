@@ -9,26 +9,41 @@ concurrency:
   group: mynids-release
   cancel-in-progress: false
 
+env:
+  IMAGE_NAME: ghcr.io/spicyhek/mynids
+  IMAGE_TAG: sha-${{ github.sha }}
+
+# mybuilds tracks every run (homelab-infra k8s/apps/mybuilds): GitHub reports
+# the jobs and steps, and the "Report ... to mybuilds" steps send the release
+# manifest and the GitOps commit. The job and step names are in mybuilds'
+# service map, so rename them there too.
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
       packages: write
 
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+      release_id: ${{ steps.release.outputs.id }}
+
     steps:
       - name: Check out app repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Full history: the converter bump diffs against the deployed converter commit.
+
+      - name: Set release ID
+        id: release
+        run: echo "id=mynids/${GITHUB_SHA::7}/production/${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python for regression tests
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - uses: actions/setup-node@v4
+      - name: Set up Node for dashboard tests
+        uses: actions/setup-node@v4
         with:
           node-version: "24"
 
@@ -37,12 +52,6 @@ jobs:
           python -m pip install -r requirements-test.txt
           python -m unittest discover -s tests -v
           node --test tests/dashboard.test.cjs
-
-      - name: Set image name
-        run: echo "IMAGE_NAME=ghcr.io/spicyhek/mynids" >> "$GITHUB_ENV"
-
-      - name: Set image tag
-        run: echo "IMAGE_TAG=sha-${GITHUB_SHA}" >> "$GITHUB_ENV"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -57,7 +66,49 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push image
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: mynids:smoke
+          platforms: linux/amd64
+
+      # The image runs with the built-in Keras model only: the v2 bundle is
+      # staged on the node, not in the image. That is enough to prove the API
+      # starts and returns the release headers mybuilds checks.
+      - name: Smoke test
+        env:
+          RELEASE_ID: ${{ steps.release.outputs.id }}
+        run: |
+          set -euo pipefail
+
+          docker run --detach --name smoke --publish 127.0.0.1:8080:8080 \
+            --env RELEASE_ID="${RELEASE_ID}" --env NIDS_INGEST_TOKEN=smoke mynids:smoke
+
+          # Loading TensorFlow and the model takes a while on a runner.
+          if ! curl --fail --silent --show-error \
+              --retry 60 --retry-all-errors --retry-delay 2 \
+              --dump-header headers.txt --output health.json \
+              http://127.0.0.1:8080/healthz; then
+            docker logs smoke
+            exit 1
+          fi
+
+          tr -d '\r' < headers.txt > headers.clean
+          grep -iqxF "x-release-id: ${RELEASE_ID}" headers.clean
+          grep -iqxF "cache-control: no-store" headers.clean
+          if [ "$(jq -r '.status' health.json)" != "ok" ]; then
+            echo "::error::/healthz is not ok: $(cat health.json)"
+            docker logs smoke
+            exit 1
+          fi
+
+          curl --fail --silent --show-error --output /dev/null http://127.0.0.1:8080/
+
+      - name: Push image
+        id: push
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -68,7 +119,100 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           platforms: linux/amd64,linux/arm64
 
+      - name: Resolve digest
+        id: digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected image digest: ${DIGEST}"
+            exit 1
+          fi
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Report release to mybuilds
+        env:
+          MYBUILDS_CI_EVENT_SECRET: ${{ secrets.MYBUILDS_CI_EVENT_SECRET }}
+          RELEASE_ID: ${{ steps.release.outputs.id }}
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          jq -cn \
+            --arg release_id "${RELEASE_ID}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha "${GITHUB_SHA}" \
+            --arg artifact "${IMAGE_NAME}" \
+            --arg digest "${DIGEST}" \
+            --argjson run_id "${GITHUB_RUN_ID}" \
+            --argjson run_number "${GITHUB_RUN_NUMBER}" \
+            --argjson attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{type: "release.published", release_id: $release_id,
+              service: "mynids", environment: "production",
+              source_repository: $repository, source_sha: $sha,
+              artifact: $artifact, artifact_digest: $digest,
+              workflow_run_id: $run_id, workflow_run_number: $run_number,
+              run_attempt: $attempt, drill: false, occurred_at: $now}' |
+            bash .github/scripts/mybuilds-event.sh
+
+  bump-gitops:
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    env:
+      DIGEST: ${{ needs.build.outputs.digest }}
+      RELEASE_ID: ${{ needs.build.outputs.release_id }}
+
+    outputs:
+      gitops_sha: ${{ steps.merge.outputs.gitops_sha }}
+
+    steps:
+      - name: Check out app repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history: the converter bump diffs against the deployed converter commit.
+
+      - name: Check for newer commit
+        id: latest
+        run: |
+          set -euo pipefail
+
+          LATEST_SHA="$(git -C "${GITHUB_WORKSPACE}" ls-remote origin refs/heads/main | cut -f1)"
+          if [ -z "${LATEST_SHA}" ]; then
+            echo "::error::Could not determine the current mynids main commit"
+            exit 1
+          fi
+
+          if [ "${LATEST_SHA}" != "${GITHUB_SHA}" ]; then
+            echo "Skipping superseded release ${GITHUB_SHA}; main is now ${LATEST_SHA}"
+            echo "superseded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "superseded=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "latest_sha=${LATEST_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Report superseded release to mybuilds
+        if: steps.latest.outputs.superseded == 'true'
+        env:
+          MYBUILDS_CI_EVENT_SECRET: ${{ secrets.MYBUILDS_CI_EVENT_SECRET }}
+          SUPERSEDED_BY: ${{ steps.latest.outputs.latest_sha }}
+        run: |
+          jq -cn \
+            --arg release_id "${RELEASE_ID}" \
+            --arg superseded_by "${SUPERSEDED_BY}" \
+            --argjson run_id "${GITHUB_RUN_ID}" \
+            --argjson attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{type: "gitops.superseded", release_id: $release_id,
+              service: "mynids", environment: "production",
+              superseded_by: $superseded_by,
+              workflow_run_id: $run_id, run_attempt: $attempt, occurred_at: $now}' |
+            bash .github/scripts/mybuilds-event.sh
+
       - name: Check out infra repository
+        if: steps.latest.outputs.superseded == 'false'
         uses: actions/checkout@v4
         with:
           repository: spicyhek/homelab-infra
@@ -76,14 +220,56 @@ jobs:
           token: ${{ secrets.INFRA_REPO_TOKEN }}
           path: homelab-infra
 
-      - name: Update image tags in kustomizations
+      - name: Pin image digest
+        if: steps.latest.outputs.superseded == 'false'
+        working-directory: homelab-infra/k8s/apps/nids
+        run: |
+          set -euo pipefail
+
+          sed -i -E "s#^([[:space:]]+)(newTag|digest): .*#\1digest: ${DIGEST}#" kustomization.yml
+          grep -qF "digest: ${DIGEST}" kustomization.yml
+
+          # The first digest-pinned release adds the patch to the kustomization.
+          if ! grep -qF "release-patch.yml" kustomization.yml; then
+            printf '\npatches:\n  - path: release-patch.yml\n' >> kustomization.yml
+          fi
+
+          cat > release-patch.yml <<EOF
+          # Rewritten by the mynids release workflow on every promotion.
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: nids
+            namespace: default
+            annotations:
+              mybuilds.brendanmanley.com/release-id: "${RELEASE_ID}"
+              mybuilds.brendanmanley.com/source-sha: "${GITHUB_SHA}"
+              mybuilds.brendanmanley.com/artifact-digest: "${DIGEST}"
+          spec:
+            template:
+              metadata:
+                annotations:
+                  mybuilds.brendanmanley.com/release-id: "${RELEASE_ID}"
+                  mybuilds.brendanmanley.com/source-sha: "${GITHUB_SHA}"
+                  mybuilds.brendanmanley.com/artifact-digest: "${DIGEST}"
+              spec:
+                containers:
+                  - name: web
+                    env:
+                      - name: RELEASE_ID
+                        value: "${RELEASE_ID}"
+          EOF
+
+      # The Zeek converter runs the same image, but a new tag restarts the
+      # whole Zeek pod (capture included), so move it only when code the
+      # converter runs changed since its deployed commit. It keeps its sha-
+      # tag: mybuilds does not track it, and the tag names that commit.
+      - name: Bump Zeek converter
+        if: steps.latest.outputs.superseded == 'false'
         working-directory: homelab-infra
         run: |
           set -euo pipefail
-          sed -i "s|newTag: .*|newTag: ${IMAGE_TAG}|" k8s/apps/nids/kustomization.yml
 
-          # The Zeek converter runs the same image, but a new tag restarts the whole Zeek pod (capture
-          # included), so move it only when code the converter runs changed since its deployed commit.
           ZEEK=k8s/daemonsets/zeek/kustomization.yml
           CONVERTER_PATHS="sensor/ app/validation.py app/__init__.py Dockerfile requirements.txt .dockerignore"
           DEPLOYED="$(sed -n 's/^ *newTag: sha-\([0-9a-f]\{40\}\) *$/\1/p' "${ZEEK}")"
@@ -99,22 +285,14 @@ jobs:
             sed -i "s|newTag: .*|newTag: ${IMAGE_TAG}|" "${ZEEK}"
           fi
 
-      - name: Commit and merge infra pull request
+      - name: Commit and open pull request
+        id: pr
+        if: steps.latest.outputs.superseded == 'false'
         working-directory: homelab-infra
         env:
           GH_TOKEN: ${{ secrets.INFRA_REPO_TOKEN }}
         run: |
           set -euo pipefail
-
-          LATEST_SHA="$(git -C "${GITHUB_WORKSPACE}" ls-remote origin refs/heads/main | cut -f1)"
-          if [ -z "${LATEST_SHA}" ]; then
-            echo "::error::Could not determine the current mynids main commit"
-            exit 1
-          fi
-          if [ "${LATEST_SHA}" != "${GITHUB_SHA}" ]; then
-            echo "Skipping superseded release ${GITHUB_SHA}; main is now ${LATEST_SHA}"
-            exit 0
-          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -122,32 +300,81 @@ jobs:
           DEPLOY_BRANCH="deploy/mynids-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           git checkout -b "${DEPLOY_BRANCH}"
 
-          git add k8s/apps/nids/kustomization.yml k8s/daemonsets/zeek/kustomization.yml
+          git add k8s/apps/nids/kustomization.yml k8s/apps/nids/release-patch.yml k8s/daemonsets/zeek/kustomization.yml
 
           if git diff --cached --quiet; then
             echo "No changes to commit"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          git commit -m "Deploy mynids ${IMAGE_TAG}"
+          git commit -m "Deploy mynids ${IMAGE_TAG}" -m "Release-Id: ${RELEASE_ID}"
           git push --set-upstream origin "${DEPLOY_BRANCH}"
 
-          DEPLOY_COMMIT="$(git rev-parse HEAD)"
           PR_URL="$(gh pr create \
             --repo spicyhek/homelab-infra \
             --base main \
             --head "${DEPLOY_BRANCH}" \
             --title "Deploy mynids ${IMAGE_TAG}" \
-            --body "Promotes mynids image \`${IMAGE_TAG}\` (the nids API, and the Zeek converter when its code changed). Generated by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}.")"
+            --body "Promotes mynids image \`${DIGEST}\` (the nids API, and the Zeek converter when its code changed). Generated by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}.")"
 
+          {
+            echo "changed=true"
+            echo "deploy_commit=$(git rev-parse HEAD)"
+            echo "pr_url=${PR_URL}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Squash merge
+        id: merge
+        if: steps.pr.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.INFRA_REPO_TOKEN }}
+          DEPLOY_COMMIT: ${{ steps.pr.outputs.deploy_commit }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+        run: |
+          set -euo pipefail
+
+          # The subject format is counted by homelab-infra's reliability scorecard.
           gh pr merge "${PR_URL}" \
             --repo spicyhek/homelab-infra \
             --squash \
-            --match-head-commit "${DEPLOY_COMMIT}"
+            --match-head-commit "${DEPLOY_COMMIT}" \
+            --subject "Deploy mynids ${IMAGE_TAG} (#${PR_URL##*/})" \
+            --body "Release-Id: ${RELEASE_ID}"
+
+          GITOPS_SHA="$(gh pr view "${PR_URL}" \
+            --repo spicyhek/homelab-infra \
+            --json mergeCommit \
+            --jq '.mergeCommit.oid')"
+          if [ -z "${GITOPS_SHA}" ]; then
+            echo "::error::Could not read the squash commit for ${PR_URL}"
+            exit 1
+          fi
+          echo "gitops_sha=${GITOPS_SHA}" >> "$GITHUB_OUTPUT"
 
           {
             echo "### mynids image promoted"
-            echo "Image: \`${IMAGE_NAME}:${IMAGE_TAG}\`"
+            echo "Release: \`${RELEASE_ID}\`"
+            echo "Image: \`${IMAGE_NAME}@${DIGEST}\`"
+            echo "GitOps commit: \`${GITOPS_SHA}\`"
             echo "Merged infrastructure PR: ${PR_URL}"
             echo "Argo CD watches homelab-infra/main and will reconcile the new image."
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Report GitOps update to mybuilds
+        if: steps.merge.outputs.gitops_sha != ''
+        env:
+          MYBUILDS_CI_EVENT_SECRET: ${{ secrets.MYBUILDS_CI_EVENT_SECRET }}
+          GITOPS_SHA: ${{ steps.merge.outputs.gitops_sha }}
+        run: |
+          jq -cn \
+            --arg release_id "${RELEASE_ID}" \
+            --arg gitops_sha "${GITOPS_SHA}" \
+            --argjson run_id "${GITHUB_RUN_ID}" \
+            --argjson attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{type: "gitops.updated", release_id: $release_id,
+              service: "mynids", environment: "production",
+              gitops_repository: "spicyhek/homelab-infra", gitops_sha: $gitops_sha,
+              workflow_run_id: $run_id, run_attempt: $attempt, occurred_at: $now}' |
+            bash .github/scripts/mybuilds-event.sh

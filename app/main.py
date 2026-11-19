@@ -22,6 +22,7 @@ from app.alert_rules import (BOTNET_REASON, LONE_SYN_RULE_ID, NO_V2_FEATURES_REA
 from app.config import settings
 from app.inference import FlowClassifier
 from app.limits import IngestBodyLimit
+from app.release_headers import ReleaseHeaders
 from app.schemas import (EventResponse, FlowBatchRequest, HealthResponse, IngestResponse, SummaryResponse,
                          WebProbeBatchRequest, WebProbeIngestResponse, WebProbeResponse)
 from app.shadow import ICMPV6_REASON, ShadowClassifier, ShadowPrediction
@@ -116,6 +117,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.add_middleware(IngestBodyLimit)
+app.add_middleware(ReleaseHeaders, release_id=lambda: settings.release_id)
 static_dir = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 

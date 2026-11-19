@@ -35,6 +35,9 @@ class Settings:
     max_history_hours: int = int(os.getenv("NIDS_MAX_HISTORY_HOURS", "168"))
     retention_hours: int = int(os.getenv("NIDS_RETENTION_HOURS", "720"))
     default_source_name: str = os.getenv("NIDS_DEFAULT_SOURCE_NAME", "homelab-flow-bridge")
+    # The deployed release's ID, such as mynids/0123456/production/57, returned in X-Release-ID on /healthz.
+    # The release workflow sets it in homelab-infra; unset, the header is left out.
+    release_id: str = os.getenv("RELEASE_ID", "").strip()
     # Optional zeek-conn-window-v2 tree bundle; its pickle loads only if the SHA-256 matches. The
     # NIDS_SHADOW_MODEL_* names are the pre-promotion spelling and are still accepted.
     v2_model_dir: Path | None = (_optional_path_env("NIDS_V2_MODEL_DIR")

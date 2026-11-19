@@ -92,8 +92,23 @@ Back up before downgrade: older code does not maintain the new deduplication led
 
 `/healthz` is liveness/status; `/readyz` additionally checks storage and returns
 503 when the model is unavailable/degraded or the ingestion token is missing.
+`/healthz` also returns the deployed release in `X-Release-ID` (from the
+`RELEASE_ID` environment variable) and `Cache-Control: no-store`, for
+[mybuilds](https://github.com/spicyhek/mybuilds)' public check, which also
+requires `"status": "ok"`.
 PR checks run the regression suites and actual model smoke test. Container builds
 also execute the smoke test for each target architecture before publication.
+
+Pushes to `main` release through `.github/workflows/release.yml`. The `build`
+job tests, builds and smoke-tests the image (`/healthz` must answer `ok` with
+the release headers), pushes it and reads its digest. The `bump-gitops` job
+pins that digest in `homelab-infra/k8s/apps/nids/kustomization.yml`, rewrites
+`release-patch.yml` with the release ID (`mynids/<sha7>/production/<run>`),
+and squash-merges the change as `Deploy mynids sha-...` with a `Release-Id:`
+trailer. The Zeek converter keeps a `sha-` tag and moves only when its code
+changed. A run whose commit is no longer the head of `main` skips the
+promotion. Both jobs report to mybuilds with the `MYBUILDS_CI_EVENT_SECRET`
+Actions secret; without it they warn and carry on.
 Direct dependencies are pinned; TensorFlow/Keras/scikit-learn versions match
 the saved model and estimator metadata. Transitive dependencies are not fully locked.
 
