@@ -250,6 +250,30 @@ Implemented locally; nothing is deployed.
     0), the homelab has no botnet ground truth, and every BOTNET label so far was
     benign. In the held-out test it flagged 30 regular benign HTTP GETs to :8080,
     which resemble the Ares C2 polls in its training data.
+- **Routine ICMPv6 is validated by rule** (v2 mode only;
+  `NIDS_VALIDATE_ROUTINE_ICMPV6`, default `true`, set `false` to disable). An
+  ICMPv6 flow is stored as classified BENIGN, instead of unvalidated
+  `icmpv6_detection_not_validated`, when all of these hold:
+  - its message type (the v1 `src_port`) is routine: neighbor solicitation or
+    advertisement, router solicitation, multicast listener messages, echo, or an
+    error message;
+  - its volume is routine: the sender's 60 s window and the flow's own packet count
+    and rate are well below flood and sweep levels;
+  - v2 also labels it BENIGN.
+
+  Each such row carries `model_id` `<v2 id>+icmpv6-rule`.
+  - Why: ICMPv6 was about 10 % of live flows, all unvalidated. In 48 h of live
+    traffic (2026-11-16..17) every unvalidated flow was ICMPv6. v2's label on
+    ICMPv6 is always BENIGN and proves nothing: its ICMPv6 training rows are 8,895
+    benign homelab flows and no attacks.
+  - Never cleared: router advertisements and redirects (a rogue router looks
+    routine by volume, and the app never sees addresses), ICMPv6 that v2 does not
+    call BENIGN, unusual volume, and flows missing the needed features.
+  - Thresholds and the live maxima behind them are in `app/alert_rules.py`.
+- The public summary splits UNVALIDATED by reason: `recent_unvalidated_reasons`
+  for the recent window and `history_unvalidated_reasons` for the requested
+  history window, as `{validation_reason: flows}`. The dashboard shows the
+  history breakdown under the Unvalidated counter.
 - Recomputed from the held-out session's preserved predictions (post hoc, the
   session is spent): the two settings together take benign false alarms from
   46/71 to 7/71, all of them successful SSH logins, and attack detection from

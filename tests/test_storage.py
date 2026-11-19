@@ -223,6 +223,32 @@ class LifetimeFlowTests(unittest.TestCase):
         self.assertEqual(self.summary(reopened)["lifetime_flows"], 1)
         self.assertEqual(dict(reopened.record_predictions("sensor", [row])), {})
 
+    def test_validated_icmpv6_counts_as_its_label_and_summary_splits_unvalidated_reasons(self):
+        store = self.open_store()
+        now, old = utcnow(), utcnow() - timedelta(hours=3)
+        rows = [
+            PredictionRow(now, "BENIGN", 0.9, "ns", 1, "h1", 58, icmpv6_validated=True),
+            PredictionRow(now, "BENIGN", 0.9, "ra", 1, "h2", 58),
+            PredictionRow(now, "BOTNET", 0.9, "poll", 6, "h3", 6, unvalidated_reason="botnet_detection_not_validated"),
+            PredictionRow(old, "BENIGN", 0.9, "cold", 2, "h4", 17, unvalidated_reason="window_not_warm"),
+            PredictionRow(old, "BENIGN", 0.9, "ping", 2, "h5", 58),
+        ]
+        self.assertEqual(rows[0].validation_status, "classified")
+        self.assertIsNone(rows[0].validation_reason)
+        self.assertEqual(dict(store.record_predictions("sensor", rows)), {"BENIGN": 1, "UNVALIDATED": 4})
+        summary = self.summary(store)
+        self.assertEqual(summary["recent_unvalidated_reasons"],
+                         {"botnet_detection_not_validated": 1, "icmpv6_detection_not_validated": 1})
+        self.assertEqual(summary["history_unvalidated_reasons"],
+                         {"icmpv6_detection_not_validated": 2, "botnet_detection_not_validated": 1,
+                          "window_not_warm": 1})
+        self.assertEqual(sum(summary["history_unvalidated_reasons"].values()), summary["retained_counts"]["UNVALIDATED"])
+        empty = StatsStore(Path(self.temp_dir.name) / "empty.sqlite3", labels=LABELS)
+        empty.initialize()
+        self.addCleanup(empty.close)
+        self.assertEqual((self.summary(empty)["recent_unvalidated_reasons"],
+                          self.summary(empty)["history_unvalidated_reasons"]), ({}, {}))
+
     def test_retained_totals_remain_exact_after_duplicate_and_purge(self):
         store = self.open_store()
         old = utcnow() - timedelta(days=40)

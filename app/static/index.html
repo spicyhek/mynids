@@ -104,6 +104,7 @@
             <article class="stat-card">
               <span class="meta-label">Unvalidated</span>
               <strong class="stat-value is-unvalidated" id="recent-unvalidated">—</strong>
+              <span class="meta-label" id="unvalidated-detail">last 24 hours: —</span>
             </article>
             <article class="stat-card">
               <span class="meta-label">Web probe requests</span>
@@ -148,9 +149,12 @@
             </div>
             <div class="class-guide-item">
               <span class="meta-label">Unvalidated</span>
-              <p>Flows with unverified detection quality: IPv6 control traffic (ICMPv6), botnet predictions, and
-                flows the model could not judge, such as the first minute after a sensor restart. Included in flow
-                totals, but counted separately from benign and suspected attacks.</p>
+              <p>Flows with unverified detection quality: botnet predictions, flows the model could not judge (such
+                as the first minute after a sensor restart), and ICMPv6 that is not routine. Since November 2026,
+                routine IPv6 housekeeping (neighbor discovery, multicast listener reports, pings and error messages
+                at normal volume) is counted as benign by a rule; router advertisements, redirects and unusually
+                heavy ICMPv6 stay unvalidated. Included in flow totals, but counted separately from benign and
+                suspected attacks.</p>
             </div>
           </div>
         </section>
@@ -197,6 +201,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=unvalidated-2"></script>
+    <script src="/static/app.js?v=unvalidated-3"></script>
   </body>
 </html>

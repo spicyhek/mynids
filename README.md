@@ -19,7 +19,13 @@ The site intentionally exposes only aggregate statistics.
 
 New flows with model feature `protocol: 58` are recorded as `unvalidated`, with
 reason `icmpv6_detection_not_validated`. Their raw model label and score are
-preserved. The operational `UNVALIDATED` category is separate from the four model
+preserved. The exception: with the v2 model operational, routine ICMPv6 (neighbor
+discovery, multicast listener reports, pings and error messages at normal
+volume) is recorded as classified BENIGN by an alert-side rule, with `model_id`
+`<v2 id>+icmpv6-rule` (`NIDS_VALIDATE_ROUTINE_ICMPV6`, default `true`; see
+`training/FEATURE_CONTRACT_V2.md`). Router advertisements, redirects and
+unusually heavy ICMPv6 stay unvalidated. The public summary reports why flows are
+unvalidated in `recent_unvalidated_reasons` and `history_unvalidated_reasons`. The operational `UNVALIDATED` category is separate from the four model
 classes: it is not a benign verdict, an attack verdict, or a fifth trained class.
 Other protocols retain status `classified`, which describes a model prediction,
 not an independently confirmed incident or an accuracy guarantee.

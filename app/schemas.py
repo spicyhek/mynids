@@ -160,6 +160,9 @@ class SummaryResponse(BaseModel):
     lifetime_packets: int
     total_events: int
     recent_counts: dict[str, int]
+    # UNVALIDATED split by validation reason, over the recent window and the requested history window.
+    recent_unvalidated_reasons: dict[str, int]
+    history_unvalidated_reasons: dict[str, int]
     all_time_counts: dict[str, int]
     retained_counts: dict[str, int]
     retained_packets: int

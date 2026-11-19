@@ -52,3 +52,51 @@ def is_lone_unanswered_syn(features: Mapping[str, float]) -> bool:
                 and features["dst_distinct_src_hosts"] <= MAX_DST_DISTINCT_SRC_HOSTS)
     except KeyError:
         return False  # Not a v2 vector; never suppress what the rule cannot judge.
+
+
+# Routine ICMPv6: IPv6 neighbor discovery, multicast listener reports, pings and error messages are ~10 % of live
+# flows (2026-11-16..17: 40,351 of 373,509) and were all stored unvalidated, because neither model was trained on
+# ICMPv6 attacks: baseline-v2's ICMPv6 training rows are 8,895 benign homelab flows, so its label there is always
+# BENIGN and proves nothing. This rule validates them instead, on message type and volume.
+#
+# Router Advertisements (134) and Redirects (137) are never cleared: a rogue router looks routine by volume, and
+# the app never sees addresses, so only an allowlist at the sensor could tell the real router apart. Floods and
+# sweeps fail the volume checks. Live maxima over the 48 h: src_conns 67, src_distinct_dst_hosts 63,
+# src_same_service_conns 1, dst_distinct_src_hosts 10, 594 packets in one flow (an MLD report over 29 min). Each
+# limit has about 3x headroom; an ND flood or an IPv6 ping sweep makes hundreds to thousands per source a minute.
+ICMPV6_RULE_ID = "icmpv6-rule"
+ROUTINE_ICMPV6_TYPES = frozenset({
+    1, 2, 3, 4,          # destination unreachable, packet too big, time exceeded, parameter problem
+    128, 129,            # echo request, echo reply
+    130, 131, 132, 143,  # multicast listener query, report, done; MLDv2 report
+    133, 135, 136,       # router solicitation, neighbor solicitation, neighbor advertisement
+})
+ICMPV6_MAX_SRC_CONNS = 200
+ICMPV6_MAX_DISTINCT_DST_HOSTS = 150
+ICMPV6_MAX_SAME_SERVICE_CONNS = 10
+ICMPV6_MAX_DST_DISTINCT_SRC_HOSTS = 30
+ICMPV6_MAX_FLOW_PKTS = 1000
+ICMPV6_MAX_PKTS_PER_S = 10.0  # Only for flows of ICMPV6_RATE_MIN_PKTS or more; tiny flows have meaningless rates.
+ICMPV6_RATE_MIN_PKTS = 20
+
+
+def is_routine_icmpv6(features: Mapping[str, float], features_v2: Mapping[str, float]) -> bool:
+    """True for an ICMPv6 flow of a routine message type at routine volume (see the comment above).
+
+    The message type is the v1 `src_port` (Zeek puts the ICMP type in id.orig_p); v2's `dst_port` is only the
+    counterpart type or code. The volume checks use v2's 60 s window for the sending host.
+    """
+    try:
+        if features_v2["protocol"] != 58 or int(features["src_port"]) not in ROUTINE_ICMPV6_TYPES:
+            return False
+        packets = features_v2["tot_fwd_pkts"] + features_v2["tot_bwd_pkts"]
+        seconds = features_v2["flow_duration"] / 1_000_000.0
+        if packets > ICMPV6_MAX_FLOW_PKTS or (
+                packets >= ICMPV6_RATE_MIN_PKTS and (seconds <= 0 or packets / seconds > ICMPV6_MAX_PKTS_PER_S)):
+            return False
+        return (features_v2["src_conns"] <= ICMPV6_MAX_SRC_CONNS
+                and features_v2["src_distinct_dst_hosts"] <= ICMPV6_MAX_DISTINCT_DST_HOSTS
+                and features_v2["src_same_service_conns"] <= ICMPV6_MAX_SAME_SERVICE_CONNS
+                and features_v2["dst_distinct_src_hosts"] <= ICMPV6_MAX_DST_DISTINCT_SRC_HOSTS)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False  # Never clear what the rule cannot judge.
