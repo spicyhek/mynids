@@ -17,8 +17,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 
-from app.alert_rules import (BOTNET_REASON, LONE_SYN_RULE_ID, NO_V2_FEATURES_REASON, V2_UNAVAILABLE_REASON,
-                             is_lone_unanswered_syn)
+from app.alert_rules import (BOTNET_REASON, ICMPV6_RULE_ID, LONE_SYN_RULE_ID, NO_V2_FEATURES_REASON,
+                             V2_UNAVAILABLE_REASON, is_lone_unanswered_syn, is_routine_icmpv6)
 from app.config import settings
 from app.inference import FlowClassifier
 from app.limits import IngestBodyLimit
@@ -205,9 +205,9 @@ def public_summary(
     if not summary["packet_counts_complete"]:
         warnings.append("Retained packet totals exclude historical flows without packet counts.")
     if summary["recent_counts"][UNVALIDATED]:
-        warnings.append("Unvalidated flows (ICMPv6, botnet predictions, and flows the model could not judge, such as "
-                        "the first minute after a sensor restart) are counted separately from benign and attack "
-                        "predictions.")
+        warnings.append("Unvalidated flows (ICMPv6 that is not routine IPv6 housekeeping, botnet predictions, and "
+                        "flows the model could not judge, such as the first minute after a sensor restart) are "
+                        "counted separately from benign and attack predictions.")
     return SummaryResponse(
         **summary, model_name=operational_model_name(),
         recent_window_minutes=settings.public_window_minutes,
@@ -243,16 +243,20 @@ def ingest_flows(payload: FlowBatchRequest, store: StatsStore = Depends(get_stor
         ))
     decided = _v2_decisions(payload, flows) if v2_operational() else {}
     suppressed = _apply_alert_rules(payload.source, flows, decided)
+    icmpv6_cleared = _validate_routine_icmpv6(flows, decided)
     _demote_botnet(decided)  # After the lone-SYN rule, which only relabels classified predictions.
     undecided = _undecided_reasons(flows, decided)
     identified_rows = []
     for row in keras_rows:
         decision = decided.get(row.flow_id)
         if decision is not None:
+            rule = (LONE_SYN_RULE_ID if row.flow_id in suppressed
+                    else ICMPV6_RULE_ID if row.flow_id in icmpv6_cleared else None)
             identified_rows.append(replace(
                 row, predicted_label=decision.predicted_label, confidence=decision.confidence,
-                model_id=f"{tree.model_id}+{LONE_SYN_RULE_ID}" if row.flow_id in suppressed else tree.model_id,
-                unvalidated_reason=decision.validation_reason if decision.validation_status == "unvalidated" else None))
+                model_id=f"{tree.model_id}+{rule}" if rule else tree.model_id,
+                unvalidated_reason=decision.validation_reason if decision.validation_status == "unvalidated" else None,
+                icmpv6_validated=row.flow_id in icmpv6_cleared))
         elif row.flow_id in undecided:
             # The Keras label is kept for reference but no longer counts as a prediction.
             identified_rows.append(replace(row, unvalidated_reason=undecided[row.flow_id]))
@@ -283,8 +287,9 @@ def _v2_decisions(payload: FlowBatchRequest, flows: list[dict]) -> dict[str, Sha
     """v2 predictions that become operational labels, by flow ID. Flows left out are undecided: stored as
     unvalidated (_undecided_reasons), or Keras-labeled with NIDS_V2_UNDECIDED=keras.
 
-    v2 decides flows with a warm, undegraded window; ICMPv6 is included because both models' ICMPv6
-    output is stored as unvalidated. If v2 cannot run, the whole batch is undecided and health degrades.
+    v2 decides flows with a warm, undegraded window; ICMPv6 is included because its output is stored as
+    unvalidated unless _validate_routine_icmpv6 clears it. If v2 cannot run, the whole batch is undecided and
+    health degrades.
     """
     global tree_runtime_error
     if tree is None or not any(flow.get("features_v2") is not None for flow in flows):
@@ -348,6 +353,26 @@ def _apply_alert_rules(source: str, flows: list[dict], decided: dict[str, Shadow
         logger.warning("Suppressed %s (%.3f) on lone unanswered SYN %s from %s", prediction.predicted_label,
                        prediction.confidence, flow["flow_id"], source)
     return suppressed
+
+
+def _validate_routine_icmpv6(flows: list[dict], decided: dict[str, ShadowPrediction]) -> set[str]:
+    """Store routine ICMPv6 that v2 called BENIGN as classified BENIGN, in place; return the flow IDs changed.
+
+    alert_rules.is_routine_icmpv6 decides; v2 only has to agree (it was never trained on an ICMPv6 attack, so any
+    other label is an extrapolation and stays unvalidated). The stored model_id records the rule.
+    """
+    if settings.validate_routine_icmpv6 != "true" or not decided:
+        return set()
+    cleared = set()
+    for flow in flows:
+        prediction = decided.get(flow["flow_id"])
+        if (prediction is None or prediction.validation_reason != ICMPV6_REASON
+                or prediction.predicted_label != "BENIGN"
+                or not is_routine_icmpv6(flow["features"], flow["features_v2"])):
+            continue
+        decided[flow["flow_id"]] = replace(prediction, validation_status="classified", validation_reason=None)
+        cleared.add(flow["flow_id"])
+    return cleared
 
 
 def _record_keras_shadow(source: str, keras_rows: list[PredictionRow], rows: list[PredictionRow],

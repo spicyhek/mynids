@@ -16,6 +16,16 @@ const LABEL_META = [
   { key: "UNVALIDATED", target: "recent-unvalidated", className: "is-unvalidated" },
 ];
 
+// Why flows are unvalidated (the stored validation_reason), in words for the dashboard.
+const UNVALIDATED_REASON_NAMES = {
+  icmpv6_detection_not_validated: "ICMPv6",
+  botnet_detection_not_validated: "botnet",
+  window_not_warm: "warming up",
+  window_degraded: "window degraded",
+  no_v2_features: "no model features",
+  v2_unavailable: "model unavailable",
+};
+
 function formatLabelName(value) {
   if (value === "UNVALIDATED") return "unvalidated";
   if (value === "BRUTE_FORCE") return "brute force";
@@ -203,6 +213,21 @@ function renderWebProbes(probes, recentWindowMinutes) {
     + `${formatNumber(probes.history_requests)} from ${clients(probes.history_clients)}`);
 }
 
+function renderUnvalidatedReasons(reasons) {
+  // Optional block: an older server sends no breakdown, which leaves the detail line blank.
+  const valid = reasons && typeof reasons === "object" && !Array.isArray(reasons)
+    && Object.values(reasons).every((value) => Number.isSafeInteger(value) && value >= 0);
+  if (!valid) {
+    setText("unvalidated-detail", `last ${HOURS} hours: —`);
+    return;
+  }
+  const parts = Object.entries(reasons)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([reason, count]) => `${UNVALIDATED_REASON_NAMES[reason] || reason.replace(/_/g, " ")} ${formatNumber(count)}`);
+  setText("unvalidated-detail", `last ${HOURS} hours: ${parts.length ? parts.join(" · ") : "none"}`);
+}
+
 async function loadSummary() {
   const controller = new AbortController();
   let timer;
@@ -280,6 +305,7 @@ async function refresh() {
     renderWarnings(data.warnings || []);
     renderHourlyChart(data.hourly || []);
     renderWebProbes(data.web_probes, data.recent_window_minutes);
+    renderUnvalidatedReasons(data.history_unvalidated_reasons);
     hasLoadedSummary = true;
     renderActivityStatus();
   } catch (error) {

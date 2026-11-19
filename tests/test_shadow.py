@@ -22,7 +22,7 @@ from app.schemas import FlowBatchRequest
 from app.shadow import CONTRACT_ID, MODEL_FILE, ShadowClassifier, ShadowPrediction
 from app.storage import PredictionRow, utcnow
 from sensor.zeek_features_v2 import FEATURE_ORDER, Extractor
-from sensor.zeek_to_cicids import FeatureV2Stream, export_log_once
+from sensor.zeek_to_cicids import FeatureV2Stream, conn_record_to_flow, export_log_once
 
 LABELS = ["BENIGN", "BOTNET", "BRUTE_FORCE", "DOS_DDOS", "OTHER_ATTACK"]
 V1_LABELS = ["BENIGN", "BOTNET", "DOS_DDOS", "OTHER_ATTACK"]
@@ -318,6 +318,52 @@ class OperationalV2ApiTests(unittest.TestCase):
                 patch.object(self.tree, "classify",
                              return_value=[ShadowPrediction("poll2", "BOTNET", 0.97, "classified", None)]):
             self.assertEqual(self.post([v2_flow("poll2")], keras_label="BENIGN").json()["labels"]["BOTNET"], 1)
+
+    def test_routine_icmpv6_is_benign_by_rule_and_the_rest_stays_unvalidated(self):
+        ns = {"ts": 1794894552.5, "uid": "Cns", "id.orig_h": "2600:1700:38c0:a2e0::1", "id.orig_p": 135,
+              "id.resp_h": "ff02::1:ff00:577", "id.resp_p": 136, "proto": "icmp", "conn_state": "OTH",
+              "missed_bytes": 0, "history": "", "orig_pkts": 1, "orig_ip_bytes": 72, "resp_pkts": 0,
+              "resp_ip_bytes": 0, "ip_proto": 58}
+
+        def flow(flow_id, **change):
+            record = {**ns, **change}
+            return {"flow_id": flow_id, "event_time": utcnow().isoformat(),
+                    "features": conn_record_to_flow(record)["features"],
+                    "features_v2": Extractor().process(record)["features"], "window_warm": True,
+                    "window_degraded": False}
+
+        def icmpv6(flow_id, label="BENIGN"):
+            return ShadowPrediction(flow_id, label, 0.99, "unvalidated", "icmpv6_detection_not_validated")
+
+        flows = [flow("ns"), flow("ra", **{"id.orig_p": 134, "id.resp_p": 0}), flow("odd"), v2_flow("ok")]
+        predictions = [icmpv6("ns"), icmpv6("ra"), icmpv6("odd", "DOS_DDOS"),
+                       ShadowPrediction("ok", "BENIGN", 0.9, "classified", None)]
+        with patch.object(self.tree, "classify", return_value=predictions):
+            response = self.post(flows, keras_label="BENIGN")
+        self.assertEqual(response.status_code, 200, response.text)
+        labels = response.json()["labels"]
+        self.assertEqual((labels["BENIGN"], labels["DOS_DDOS"], labels["UNVALIDATED"]), (2, 0, 2))
+        events = {e["flow_id"]: e for e in self.client.get("/api/internal/events", headers=self.headers).json()}
+        tree_id = self.tree.model_id
+        self.assertEqual((events["ns"]["predicted_label"], events["ns"]["validation_status"],
+                          events["ns"]["validation_reason"], events["ns"]["model_id"]),
+                         ("BENIGN", "classified", None, f"{tree_id}+icmpv6-rule"))
+        # A router advertisement, and ICMPv6 that v2 does not call BENIGN, are not cleared.
+        for flow_id in ("ra", "odd"):
+            self.assertEqual((events[flow_id]["validation_status"], events[flow_id]["validation_reason"],
+                              events[flow_id]["model_id"]),
+                             ("unvalidated", "icmpv6_detection_not_validated", tree_id))
+        self.assertEqual(events["odd"]["predicted_label"], "DOS_DDOS")  # Kept for reference, not counted.
+        summary = self.client.get("/api/internal/shadow/summary", headers=self.headers).json()
+        self.assertEqual(summary["operational_label_sources"], {f"{tree_id}+icmpv6-rule": 1, tree_id: 3})
+        public = self.client.get("/api/public/summary").json()
+        self.assertEqual(public["recent_counts"]["UNVALIDATED"], 2)
+        self.assertEqual(public["recent_unvalidated_reasons"], {"icmpv6_detection_not_validated": 2})
+        self.assertEqual(public["history_unvalidated_reasons"], {"icmpv6_detection_not_validated": 2})
+        # Disabled, every ICMPv6 flow stays unvalidated.
+        with patch.object(main, "settings", replace(main.settings, validate_routine_icmpv6="false")),                 patch.object(self.tree, "classify", return_value=[icmpv6("ns2")]):
+            response = self.post([flow("ns2", uid="Cns2")], keras_label="BENIGN")
+        self.assertEqual(response.json()["labels"]["UNVALIDATED"], 1)
 
     def test_v2_failure_stores_unvalidated_and_degrades_health_but_not_readiness(self):
         with patch.object(self.tree, "classify", side_effect=RuntimeError("model crashed")):

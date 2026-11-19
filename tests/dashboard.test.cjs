@@ -195,6 +195,24 @@ test("unvalidated flows have a separate counter, label row and hourly segment", 
   assert.equal(app.nodes.get("activity-badge").textContent, "Live");
 });
 
+test("the unvalidated counter shows why flows are unvalidated", async () => {
+  const counts = { BENIGN: 0, BOTNET: 0, BRUTE_FORCE: 0, DOS_DDOS: 0, OTHER_ATTACK: 0, UNVALIDATED: 10 };
+  const reasons = { window_not_warm: 2, icmpv6_detection_not_validated: 1200, botnet_detection_not_validated: 3,
+    new_reason: 1, v2_unavailable: 0 };
+  const app = dashboard(async () => ok({ ...summary, retained_counts: counts, recent_counts: counts,
+    hourly: [{ bucket_start: summary.generated_at, counts }], history_unvalidated_reasons: reasons }));
+  await settle();
+  assert.equal(app.nodes.get("unvalidated-detail").textContent,
+    `last 24 hours: ICMPv6 ${(1200).toLocaleString()} · botnet 3 · warming up 2 · new reason 1`);
+  for (const value of [{}, undefined, { icmpv6_detection_not_validated: -1 }, ["x"]]) {
+    const other = dashboard(async () => ok({ ...summary, history_unvalidated_reasons: value }));
+    await settle();
+    assert.equal(other.nodes.get("unvalidated-detail").textContent,
+      value && !Array.isArray(value) && !Object.keys(value).length ? "last 24 hours: none" : "last 24 hours: —");
+    assert.equal(other.nodes.get("activity-badge").textContent, "Live");  // An odd breakdown never breaks the page.
+  }
+});
+
 test("brute force has its own counter, label row and hourly segment", async () => {
   const counts = { BENIGN: 4, BOTNET: 0, BRUTE_FORCE: 3, DOS_DDOS: 0, OTHER_ATTACK: 0, UNVALIDATED: 0 };
   const app = dashboard(async () => ok({ ...summary, total_events: 7, retained_counts: counts,

@@ -45,14 +45,18 @@ class PredictionRow:
     model_id: str | None = None  # The model whose label is stored; NULL on rows from before it was recorded.
     # Why a non-ICMPv6 row is unvalidated (e.g. a cold window, or a BOTNET prediction); None means classified.
     unvalidated_reason: str | None = None
+    # ICMPv6 that an alert-side rule validated (alert_rules.is_routine_icmpv6); other ICMPv6 stays unvalidated.
+    icmpv6_validated: bool = False
 
     @property
     def validation_status(self) -> str:
-        return "unvalidated" if self.protocol == 58 or self.unvalidated_reason else "classified"
+        return "unvalidated" if self.validation_reason else "classified"
 
     @property
     def validation_reason(self) -> str | None:
-        return ICMPV6_REASON if self.protocol == 58 else self.unvalidated_reason
+        if self.protocol == 58 and not self.icmpv6_validated:
+            return ICMPV6_REASON
+        return self.unvalidated_reason
 
     @property
     def summary_label(self) -> str:
@@ -602,6 +606,26 @@ class StatsStore:
                 label = str(row["classification"])
                 counts[label] = int(row["total"])
 
+            # Why flows are unvalidated, for the recent and history windows. The summary index filters time and
+            # status without touching the table (the planner otherwise picks the observed_at index and reads every
+            # row in the window); only unvalidated rows, a few hundred a day once routine ICMPv6 is validated, are
+            # looked up for their reason.
+            unvalidated_reasons = {}
+            for name, cutoff in (("recent", recent_cutoff), ("history", history_cutoff)):
+                unvalidated_reasons[name] = {
+                    str(row["reason"]): int(row["total"])
+                    for row in self._connection.execute(
+                        """
+                        SELECT COALESCE(validation_reason, 'unknown') AS reason, COUNT(*) AS total
+                        FROM classified_events INDEXED BY idx_classified_events_summary
+                        WHERE observed_at >= ? AND observed_at <= ? AND validation_status = 'unvalidated'
+                        GROUP BY reason
+                        ORDER BY total DESC, reason ASC
+                        """,
+                        (cutoff, upper_bound),
+                    )
+                }
+
             for row in self._connection.execute(
                 """
                 SELECT source, COUNT(*) AS total
@@ -630,6 +654,8 @@ class StatsStore:
             "lifetime_packets": lifetime_packets,
             "total_events": total_events,
             "recent_counts": recent_counts,
+            "recent_unvalidated_reasons": unvalidated_reasons["recent"],
+            "history_unvalidated_reasons": unvalidated_reasons["history"],
             "all_time_counts": all_time_counts,
             "retained_counts": all_time_counts,
             "retained_packets": retained_packets,
