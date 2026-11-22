@@ -56,6 +56,11 @@ class Settings:
     v2_undecided: str = os.getenv("NIDS_V2_UNDECIDED", "unvalidated").strip().lower()
     # v2 mode only: BOTNET predictions are stored as "unvalidated" (botnet_detection_not_validated), or "alert".
     botnet_alerts: str = os.getenv("NIDS_BOTNET_ALERTS", "unvalidated").strip().lower()
+    # Web scans (app/web_scans.py): one client's web-probe events with no gap over NIDS_WEB_SCAN_GAP_SECONDS,
+    # at least NIDS_WEB_SCAN_MIN_REQUESTS of them for at least NIDS_WEB_SCAN_MIN_DISTINCT_URIS different URIs.
+    web_scan_gap_seconds: int = int(os.getenv("NIDS_WEB_SCAN_GAP_SECONDS", "60"))
+    web_scan_min_requests: int = int(os.getenv("NIDS_WEB_SCAN_MIN_REQUESTS", "10"))
+    web_scan_min_distinct_uris: int = int(os.getenv("NIDS_WEB_SCAN_MIN_DISTINCT_URIS", "5"))
 
     def __post_init__(self) -> None:
         if self.suppress_lone_unanswered_syn not in ("true", "false"):
@@ -66,7 +71,8 @@ class Settings:
             raise ValueError("NIDS_V2_UNDECIDED must be 'unvalidated' or 'keras'.")
         if self.botnet_alerts not in ("unvalidated", "alert"):
             raise ValueError("NIDS_BOTNET_ALERTS must be 'unvalidated' or 'alert'.")
-        for name in ("public_window_minutes", "stale_after_seconds", "max_history_hours", "retention_hours"):
+        for name in ("public_window_minutes", "stale_after_seconds", "max_history_hours", "retention_hours",
+                     "web_scan_gap_seconds", "web_scan_min_requests", "web_scan_min_distinct_uris"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive.")
         if self.operational_model not in ("keras", "v2"):

@@ -121,15 +121,47 @@ class WebProbeBucket(BaseModel):
     bucket_start: datetime
     requests: int
     clients: int
+    scans: int = 0  # Web scans that started in this hour.
+
+
+class PublicWebScan(BaseModel):
+    """A web scan (app/web_scans.py) without the client, its user agents or the URIs it asked for."""
+    started_at: datetime
+    ended_at: datetime
+    duration_seconds: float
+    requests: int
+    distinct_uris: int
+    probe_paths: int
+    not_found: int
+    client_errors: int
+    succeeded: int
+    connections: int
+    hosts: list[str]
+
+
+class WebScanResponse(PublicWebScan):
+    """A web scan with its client: private, behind the ingest token."""
+    client: str
+    user_agents: list[str]
+    sample_uris: list[str]
+    succeeded_uris: list[str]
 
 
 class WebProbeSummary(BaseModel):
-    """Counts only: client addresses never appear in the public summary."""
+    """Counts only: client addresses never appear in the public summary.
+
+    Requests and clients count probe-path requests. Scans group a client's probe-path requests and other 4xx answers
+    (app/web_scans.py); `scans` lists the most recent ones in the history window, newest first.
+    """
     recent_requests: int
     recent_clients: int
     history_requests: int
     history_clients: int
     hourly: list[WebProbeBucket]
+    recent_scans: int = 0
+    history_scans: int = 0
+    history_scans_succeeded: int = 0
+    scans: list[PublicWebScan] = []
 
 
 class SourceCount(BaseModel):

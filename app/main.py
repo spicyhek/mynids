@@ -8,7 +8,7 @@ import logging
 from collections import Counter
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -24,7 +24,7 @@ from app.inference import FlowClassifier
 from app.limits import IngestBodyLimit
 from app.release_headers import ReleaseHeaders
 from app.schemas import (EventResponse, FlowBatchRequest, HealthResponse, IngestResponse, SummaryResponse,
-                         WebProbeBatchRequest, WebProbeIngestResponse, WebProbeResponse)
+                         WebProbeBatchRequest, WebProbeIngestResponse, WebProbeResponse, WebScanResponse)
 from app.shadow import ICMPV6_REASON, ShadowClassifier, ShadowPrediction
 from app.storage import FlowConflict, PredictionRow, StatsStore, UNVALIDATED
 
@@ -213,7 +213,7 @@ def public_summary(
         recent_window_minutes=settings.public_window_minutes,
         retention_hours=settings.retention_hours, stale_after_seconds=settings.stale_after_seconds,
         ingest_enabled=bool(settings.ingest_token), warnings=warnings,
-        web_probes=store.web_probe_summary(settings.public_window_minutes, hours),
+        web_probes=store.web_probe_summary(settings.public_window_minutes, hours, **web_scan_options()),
     )
 
 
@@ -445,6 +445,23 @@ def internal_web_probes(
     """Probe requests with client addresses, newest first (private: behind the ingest token)."""
     response.headers["Cache-Control"] = "no-store"
     return store.list_web_probes(history_hours=hours, limit=limit)
+
+
+def web_scan_options() -> dict:
+    return {"gap_seconds": settings.web_scan_gap_seconds, "min_requests": settings.web_scan_min_requests,
+            "min_distinct_uris": settings.web_scan_min_distinct_uris}
+
+
+@app.get("/api/internal/web-scans", response_model=list[WebScanResponse],
+         dependencies=[Depends(require_ingest_token)])
+def internal_web_scans(
+    response: Response,
+    hours: int = Query(default=24, ge=1, le=settings.max_history_hours),
+    store: StatsStore = Depends(get_store),
+) -> list[dict]:
+    """Web scans with their clients, user agents and sample URIs, newest first (private: behind the ingest token)."""
+    response.headers["Cache-Control"] = "no-store"
+    return store.web_scans(since=datetime.now(UTC) - timedelta(hours=hours), **web_scan_options())
 
 
 @app.get("/api/internal/shadow/summary", dependencies=[Depends(require_ingest_token)])

@@ -121,14 +121,27 @@ function hourlyTotals(hourly) {
   return totals;
 }
 
-/** Web probe counts, or null when the server sends none or sends something malformed. */
+const SCAN_COUNTS = ["requests", "distinct_uris", "probe_paths", "not_found", "connections", "succeeded"];
+
+/** Web probe counts, or null when the server sends none or sends something malformed. Scans are optional: an older
+ * server sends none, and a malformed list is dropped (scans null) rather than the whole panel. */
 function validProbes(probes) {
   if (!probes || !["recent_requests", "recent_clients", "history_requests", "history_clients"]
     .every((key) => isCount(probes[key]))) return null;
   const hourly = Array.isArray(probes.hourly)
     && probes.hourly.every((bucket) => bucket && isCount(bucket.requests) && Number.isFinite(Date.parse(bucket.bucket_start)))
     ? probes.hourly : [];
-  return { ...probes, hourly };
+  const scans = isCount(probes.history_scans) && Array.isArray(probes.scans)
+    && probes.scans.every((scan) => scan && validDate(scan.started_at) && Number.isFinite(scan.duration_seconds)
+      && SCAN_COUNTS.every((key) => isCount(scan[key])))
+    ? probes.scans : null;
+  return { ...probes, hourly, scans };
+}
+
+function formatDuration(seconds) {
+  if (seconds < 60) return `${Math.max(0, Math.round(seconds))} s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min`;
+  return `${(seconds / 3600).toFixed(1)} h`;
 }
 
 /** Per-sensor rows, or null when the server sends none or sends something malformed. */
@@ -229,6 +242,7 @@ function renderRangeTitles(shown) {
     "title-attacks": `Suspected attacks · ${shown.short}`,
     "title-unvalidated": `Unvalidated · ${shown.short}`,
     "title-probes": `Web probes · ${shown.short}`,
+    "title-scans": `Web scans · ${shown.short}`,
     "title-classes": `Classifications · ${shown.short}`,
     "title-reasons": `By reason · ${shown.short}`,
     "title-chart-flows": `Flows per ${per}`,
@@ -263,7 +277,8 @@ function renderStats(data, shown) {
 
   const probes = validProbes(data.web_probes);
   setText("metric-probes", probes ? formatNumber(probes.history_requests) : "—");
-  setText("metric-probes-detail", probes ? `from ${clientsText(probes.history_clients)}` : "Not reported");
+  const scanCount = probes && probes.scans ? ` · ${formatNumber(probes.history_scans)} ${probes.history_scans === 1 ? "scan" : "scans"}` : "";
+  setText("metric-probes-detail", probes ? `from ${clientsText(probes.history_clients)}${scanCount}` : "Not reported");
   setHtml("spark-probes", probes ? sparkSvg(group(probes.hourly, shown.group).values((bucket) => bucket.requests)) : "");
 
   const sensors = validSensors(data.sensors);
@@ -531,6 +546,41 @@ function renderSensors(sensors) {
   });
 }
 
+function renderScans(webProbes) {
+  // Web scans grouped by the server (app/web_scans.py), newest first; the server sends at most 20.
+  const list = document.getElementById("scan-list");
+  if (!list) return;
+  list.innerHTML = "";
+  const probes = validProbes(webProbes);
+  const scans = probes ? probes.scans : null;
+  if (!scans || scans.length === 0) {
+    list.innerHTML = `<tr><td colspan="8" class="subtle">${scans ? "No web scans in this range." : "Web scans are not reported."}</td></tr>`;
+    return;
+  }
+  scans.forEach((scan) => {
+    const row = document.createElement("tr");
+    const served = scan.succeeded > 0
+      ? `<td class="state is-alert">${formatNumber(scan.succeeded)} probe ${scan.succeeded === 1 ? "path" : "paths"}</td>`
+      : `<td class="subtle">Nothing</td>`;
+    row.innerHTML = `
+      <td>${formatTipTime(scan.started_at)}</td>
+      <td class="n">${formatNumber(scan.requests)}</td>
+      <td class="n hide-sm">${formatNumber(scan.distinct_uris)}</td>
+      <td class="n hide-sm">${formatNumber(scan.probe_paths)}</td>
+      <td class="n">${formatNumber(scan.not_found)}</td>
+      <td class="n hide-sm">${formatNumber(scan.connections)}</td>
+      <td class="n hide-sm">${formatDuration(scan.duration_seconds)}</td>
+      ${served}
+    `;
+    list.appendChild(row);
+  });
+  if (probes.history_scans > scans.length) {
+    const more = document.createElement("tr");
+    more.innerHTML = `<td colspan="8" class="subtle">Latest ${formatNumber(scans.length)} of ${formatNumber(probes.history_scans)} scans.</td>`;
+    list.appendChild(more);
+  }
+}
+
 function renderSystem(data) {
   setText("model-name", data.model_name);
   renderModelSince(data.counter_provenance);
@@ -777,6 +827,7 @@ async function refresh() {
     renderCharts(data, requested);
     renderClassList(data.hourly);
     renderUnvalidatedReasons(data.history_unvalidated_reasons);
+    renderScans(data.web_probes);
     renderLabelList(data.retained_counts);
     renderSensors(data.sensors);
     renderSystem(data);

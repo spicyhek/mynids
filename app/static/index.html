@@ -85,7 +85,7 @@
       </details>
 
       <details class="row" open>
-        <summary><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg><span>Traffic</span><span class="cnt">(4 panels)</span></summary>
+        <summary><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg><span>Traffic</span><span class="cnt">(5 panels)</span></summary>
         <div class="grid">
           <section class="panel span-16">
             <div class="ph"><h3 id="title-chart-flows">Flows per hour</h3><svg class="i info" viewBox="0 0 24 24" role="img" aria-label="Classified flows, stacked. The last bucket is still in progress."><title>Classified flows, stacked. The last bucket is still in progress.</title><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg></div>
@@ -105,6 +105,15 @@
             <div class="ph"><h3 id="title-chart-probes">Web probe requests per hour</h3><svg class="i info" viewBox="0 0 24 24" role="img" aria-label="HTTP requests for paths only scanners ask for. Counted separately from flows."><title>HTTP requests for paths only scanners ask for. Counted separately from flows.</title><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg></div>
             <div class="pb"><div class="ts-plot" id="chart-probes" style="--h: 170px"></div>
               <table class="legend"><thead><tr><th>Name</th><th title="The latest bucket, still in progress">Last *</th><th>Mean</th><th>Max</th></tr></thead><tbody id="legend-probes"></tbody></table></div>
+          </section>
+          <section class="panel span-24">
+            <div class="ph"><h3 id="title-scans">Web scans · 24h</h3><svg class="i info" viewBox="0 0 24 24" role="img" aria-label="One client's burst of probe requests and failed (4xx) requests: by default at least 10 requests for 5 different paths, with no pause over a minute. Detected from HTTP requests, not by the model."><title>One client's burst of probe requests and failed (4xx) requests: by default at least 10 requests for 5 different paths, with no pause over a minute. Detected from HTTP requests, not by the model.</title><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg></div>
+            <div class="pb">
+              <table class="gtable">
+                <thead><tr><th>Started</th><th class="n">Requests</th><th class="n hide-sm">Paths</th><th class="n hide-sm">Probe paths</th><th class="n">Not found</th><th class="n hide-sm">Connections</th><th class="n hide-sm">Duration</th><th>Served</th></tr></thead>
+                <tbody id="scan-list"></tbody>
+              </table>
+            </div>
           </section>
         </div>
       </details>
@@ -195,9 +204,14 @@
                     heavy ICMPv6 stay unvalidated. Included in flow totals, but counted separately from benign and
                     suspected attacks.</dd></div>
                 <div class="is-probe"><dt><i></i>Web probes</dt>
-                  <dd>HTTP requests for paths only scanners ask for, such as <code>.env</code>, <code>.git</code>,
-                    WordPress or PHP files. Detected from request paths, not by the model, and counted separately from
-                    flows.</dd></div>
+                  <dd>HTTP requests for paths only scanners ask for, such as <code>.env</code>, <code>.git</code> or
+                    other dotfiles, WordPress or PHP files. Detected from request paths, not by the model, and counted
+                    separately from flows.</dd></div>
+                <div class="is-probe"><dt><i></i>Web scans</dt>
+                  <dd>One client's burst of web probes and other failed requests, grouped into a single event: at
+                    least 10 requests for 5 different paths with no pause over a minute. The flow model rarely flags
+                    these, because the reverse proxy hides each scanner behind its own address. <em>Served</em> counts
+                    probe paths that were answered with content instead of an error.</dd></div>
               </dl>
             </div>
           </section>
@@ -206,6 +220,6 @@
     </main>
 
     <div class="tip" id="chart-tip" role="tooltip"></div>
-    <script src="/static/app.js?v=ui-e-1"></script>
+    <script src="/static/app.js?v=ui-e-2"></script>
   </body>
 </html>

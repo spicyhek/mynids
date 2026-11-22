@@ -72,6 +72,38 @@ test("web probes render counts and tolerate a summary without them", async () =>
   assert.equal(old.nodes.get("metric-probes").textContent, "—");
   assert.equal(old.nodes.get("metric-probes-detail").textContent, "Not reported");
   assert.match(old.nodes.get("chart-probes").innerHTML, /not reported/);
+  assert.match(old.nodes.get("scan-list").innerHTML, /Web scans are not reported/);
+});
+
+test("web scans render as a table, flag a served probe path, and drop a malformed list", async () => {
+  const scan = { started_at: "2026-10-01T00:26:57Z", ended_at: "2026-10-01T00:27:02Z", duration_seconds: 4.2,
+    requests: 163, distinct_uris: 163, probe_paths: 127, not_found: 163, client_errors: 163, succeeded: 0,
+    connections: 9, hosts: ["brendanmanley.com"] };
+  const probes = { recent_requests: 127, recent_clients: 1, history_requests: 127, history_clients: 1, hourly: [],
+    recent_scans: 2, history_scans: 3, history_scans_succeeded: 1,
+    scans: [{ ...scan, succeeded: 1, duration_seconds: 125 }, scan] };
+  const app = dashboard(async () => ok({ ...summary, web_probes: probes }));
+  await settle();
+  assert.equal(app.nodes.get("metric-probes-detail").textContent, "from 1 client · 3 scans");
+  const rows = app.nodes.get("scan-list").children.map((row) => row.innerHTML);
+  assert.equal(rows.length, 3);
+  assert.match(rows[0], /class="state is-alert">1 probe path</);
+  assert.match(rows[0], />2 min</);
+  assert.match(rows[1], />Nothing</);
+  assert.match(rows[1], />163</);
+  assert.match(rows[1], />4 s</);
+  assert.match(rows[2], /Latest 2 of 3 scans/);
+
+  const none = dashboard(async () => ok({ ...summary, web_probes: { ...probes, history_scans: 0, scans: [] } }));
+  await settle();
+  assert.equal(none.nodes.get("metric-probes-detail").textContent, "from 1 client · 0 scans");
+  assert.match(none.nodes.get("scan-list").innerHTML, /No web scans in this range/);
+
+  const bad = dashboard(async () => ok({ ...summary, web_probes: { ...probes, scans: [{ ...scan, requests: -1 }] } }));
+  await settle();
+  assert.equal(bad.nodes.get("metric-probes").textContent, "127");  // Probe counts still render.
+  assert.equal(bad.nodes.get("metric-probes-detail").textContent, "from 1 client");
+  assert.match(bad.nodes.get("scan-list").innerHTML, /not reported/);
 });
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
