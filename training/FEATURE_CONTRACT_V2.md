@@ -297,6 +297,38 @@ Implemented locally; nothing is deployed.
   - Rollout: deploy the server first. Then set `NIDS_HTTP_LOG_PATH=/zeek-logs/http.log`
     on the converter. Until the server has the endpoint, probe batches wait in
     their pending file and flows are unaffected.
+- **Web scans** (2026-11-22, after the 2026-11-21 review in
+  `data/evaluation/analyses/live-alert-20261121/`).
+  - `probe-path-v2` widens the path rule to any dot-segment except
+    `/.well-known/` plus named secret files (`terraform.tfstate`, `secrets.*`,
+    `credentials.json`, `phpinfo`, ...). v1 matched 78 of the 163 requests in
+    that day's scan.
+  - The converter also exports every other 4xx answer as `client-error-v1`, so
+    a scanner guessing unknown paths still leaves a trail. In 121 h of live
+    `http.log`, every 4xx came through the public proxy, and outside bursts of
+    5+ requests there were about 1.4 an hour.
+  - The app groups events per client into scans (`app/web_scans.py`): no gap
+    over `NIDS_WEB_SCAN_GAP_SECONDS` (60), at least
+    `NIDS_WEB_SCAN_MIN_REQUESTS` (10) requests for at least
+    `NIDS_WEB_SCAN_MIN_DISTINCT_URIS` (5) URIs. On the same 121 h this gives 27
+    scans and no false positive. The only other group of 10+ was the operator
+    retrying `/healthz`, which the distinct-URI floor drops. v2, in shadow or
+    operational, alerted on 2 of the 27.
+  - A scan counts `succeeded` when a probe *path* (not only its query string) is
+    answered 2xx: that may be a real file handed over. `/?phpinfo=1` answered
+    200 is the home page.
+  - The public summary's `web_probes` block adds `recent_scans`,
+    `history_scans`, `history_scans_succeeded`, per-hour `scans` and the latest
+    20 scans with no client, user agent or URI. Its request and client counts
+    still cover probe paths only. `GET /api/internal/web-scans` (token) lists
+    scans with clients, user agents and sample URIs. The dashboard has a Web
+    scans table.
+  - Rollout: the release workflow moves both, because `sensor/` changed (the
+    converter bump restarts the Zeek pod, capture included). Order does not
+    matter. An older converter sends only `probe-path-v1` events, and scans
+    still form from those. An older server stores `client-error-v1` events
+    (the rule is free text), but until it updates it counts them in its
+    probe totals.
 
 ### Shadow rollout (for the operator, through GitOps)
 

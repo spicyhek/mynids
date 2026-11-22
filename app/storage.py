@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app.debug_log import agent_log
+from app.web_scans import DEFAULT_GAP_SECONDS, DEFAULT_MIN_DISTINCT_URIS, DEFAULT_MIN_REQUESTS, group_scans
 
 
 SQLITE_DT_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -434,33 +435,73 @@ class StatsStore:
                 "INSERT OR IGNORE INTO web_probe_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", values)
             return self._connection.total_changes - before
 
-    def web_probe_summary(self, recent_window_minutes: int, history_hours: int) -> dict:
-        """Requests and distinct clients, recent and per hour over the history window. Counts only."""
+    def web_probe_summary(self, recent_window_minutes: int, history_hours: int, *,
+                          gap_seconds: int = DEFAULT_GAP_SECONDS, min_requests: int = DEFAULT_MIN_REQUESTS,
+                          min_distinct_uris: int = DEFAULT_MIN_DISTINCT_URIS, scan_limit: int = 20) -> dict:
+        """Probe-path requests and distinct clients, recent and per hour over the history window, and web scans.
+
+        Counts only: the scans carry no client, user agent or URI. Requests count probe-path rules alone, as they
+        did before 4xx answers were exported (client-error-v1); those only feed scans.
+        """
         now = utcnow()
         recent_cutoff = to_sqlite_dt(now - timedelta(minutes=recent_window_minutes))
         history_cutoff = to_sqlite_dt(now - timedelta(hours=history_hours))
+        probe = "rule LIKE 'probe-path%'"
         with self._lock:
             recent = self._connection.execute(
                 "SELECT COUNT(*) AS requests, COUNT(DISTINCT client) AS clients FROM web_probe_events "
-                "WHERE observed_at >= ?", (recent_cutoff,)).fetchone()
+                f"WHERE observed_at >= ? AND {probe}", (recent_cutoff,)).fetchone()
             history = self._connection.execute(
                 "SELECT COUNT(*) AS requests, COUNT(DISTINCT client) AS clients FROM web_probe_events "
-                "WHERE observed_at >= ?", (history_cutoff,)).fetchone()
+                f"WHERE observed_at >= ? AND {probe}", (history_cutoff,)).fetchone()
             rows = self._connection.execute(
-                """SELECT strftime('%Y-%m-%d %H:00:00', observed_at) AS bucket_start,
+                f"""SELECT strftime('%Y-%m-%d %H:00:00', observed_at) AS bucket_start,
                           COUNT(*) AS requests, COUNT(DISTINCT client) AS clients
-                   FROM web_probe_events WHERE observed_at >= ? GROUP BY 1""", (history_cutoff,)).fetchall()
+                   FROM web_probe_events WHERE observed_at >= ? AND {probe} GROUP BY 1""",
+                (history_cutoff,)).fetchall()
         hourly = {from_sqlite_dt(str(row["bucket_start"])): (int(row["requests"]), int(row["clients"]))
                   for row in rows}
-        bucket = (now - timedelta(hours=history_hours)).replace(minute=0, second=0, microsecond=0)
+        history_start = now - timedelta(hours=history_hours)
+        recent_start = now - timedelta(minutes=recent_window_minutes)
+        scans = self.web_scans(since=min(history_start, recent_start), gap_seconds=gap_seconds,
+                               min_requests=min_requests, min_distinct_uris=min_distinct_uris)
+        history_scans = [scan for scan in scans if scan["ended_at"] >= history_start]
+        first = history_start.replace(minute=0, second=0, microsecond=0)
+        started = Counter(max(scan["started_at"], first).replace(minute=0, second=0, microsecond=0)
+                          for scan in history_scans)
+        bucket = first
         buckets = []
         while bucket <= now:
             requests, clients = hourly.get(bucket, (0, 0))
-            buckets.append({"bucket_start": bucket, "requests": requests, "clients": clients})
+            buckets.append({"bucket_start": bucket, "requests": requests, "clients": clients,
+                            "scans": started.get(bucket, 0)})
             bucket += timedelta(hours=1)
+        private = ("client", "user_agents", "sample_uris", "succeeded_uris")
         return {"recent_requests": int(recent["requests"]), "recent_clients": int(recent["clients"]),
                 "history_requests": int(history["requests"]), "history_clients": int(history["clients"]),
-                "hourly": buckets}
+                "hourly": buckets,
+                "recent_scans": sum(scan["ended_at"] >= recent_start for scan in scans),
+                "history_scans": len(history_scans),
+                "history_scans_succeeded": sum(bool(scan["succeeded"]) for scan in history_scans),
+                "scans": [{key: value for key, value in scan.items() if key not in private}
+                          for scan in history_scans[:scan_limit]]}
+
+    def web_scans(self, *, since: datetime, gap_seconds: int = DEFAULT_GAP_SECONDS,
+                  min_requests: int = DEFAULT_MIN_REQUESTS,
+                  min_distinct_uris: int = DEFAULT_MIN_DISTINCT_URIS) -> list[dict]:
+        """Web scans still running at or after `since`, newest first, with clients (app/web_scans.py).
+
+        Events from an hour earlier are read too, so a scan that began before `since` is not cut in two.
+        """
+        cutoff = to_sqlite_dt(since - timedelta(hours=1))
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT event_id, observed_at, client, host, uri, status_code, user_agent, rule
+                   FROM web_probe_events WHERE observed_at >= ? ORDER BY observed_at""", (cutoff,)).fetchall()
+        events = [{**dict(row), "observed_at": from_sqlite_dt(row["observed_at"])} for row in rows]
+        scans = group_scans(events, gap_seconds=gap_seconds, min_requests=min_requests,
+                            min_distinct_uris=min_distinct_uris)
+        return [scan for scan in scans if scan["ended_at"] >= since]
 
     def list_web_probes(self, *, history_hours: int, limit: int) -> list[dict]:
         """Most recent web-probe events first, within the history window."""

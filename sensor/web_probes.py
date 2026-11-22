@@ -8,6 +8,14 @@ keep-alive connections shared with real visitors, so the connection looks ordina
 On 70 h of live traffic (2026-11-07 to 11-10) the pattern matched 1,023 requests from about 20 clients, all to
 the personal site, 1,022 of them answered 404; it matched nothing on any other host. Events carry the client
 address (the right-most forwarded address, the one the trusted proxy added), so they stay on the private API.
+
+probe-path-v2 (2026-11-22) matches any dot-segment except /.well-known/: a 2026-11-21 scanner sent 163 secret-file
+requests and v1 matched only 78 (.kube, .azure, .config/gcloud, .svn, terraform.tfstate, secrets.json, ...). No
+dot-path request got a non-error answer in about 120 h of live http.log.
+
+Any other 4xx answer is exported too, as client-error-v1, so the app can group a client's burst of failed requests
+into a scan whatever paths it guesses (app/web_scans.py). Ordinary visitors are rare here: in the same 120 h every
+4xx came through the public proxy, and outside groups of 5+ requests there were about 1.4 an hour.
 """
 from __future__ import annotations
 
@@ -18,12 +26,16 @@ import re
 from typing import Any
 from urllib import error, request
 
-PROBE_RULE = "probe-path-v1"
+PROBE_RULE = "probe-path-v2"
+CLIENT_ERROR_RULE = "client-error-v1"
 PROBE = re.compile(
-    r"(^|/)\.(env|git|aws|docker|ssh|claude|cursor|boto|npmrc|vscode|htpasswd|DS_Store|amplifyrc)"
+    # Any dot-segment except /.well-known/: dotfiles and VCS dirs (.env, .git, .aws, .kube, .svn, ...) and ../
+    r"(^|/)\.(?!well-known(/|$))[^/]"
     r"|wp-(login|admin|content|includes|json)|xmlrpc\.php|phpmyadmin|\.sql($|\?)"
-    r"|config\.(env|json|php|yml)|/(cgi-bin|actuator|vendor/phpunit|server-status|HNAP1|boaform)"
-    r"|\.php($|\?)|/admin|\.bak($|\?)", re.I)
+    r"|config\.(env|json|php|ya?ml)|/(cgi-bin|actuator|vendor/phpunit|server-status|HNAP1|boaform)"
+    r"|\.php($|\?)|/admin|\.(bak|old|backup|save|swp)($|\?)"
+    r"|terraform\.tf(state|vars)|(^|/)(client_)?secrets?\.(json|ya?ml|toml)|(^|/)credentials(\.json)?($|\?)"
+    r"|service[-_]account[^/]*\.json|phpinfo|/_(environment|profiler)(/|$|\?)|(^|/)web\.config($|\?)", re.I)
 _FORWARDED_FOR = re.compile(r"for=\"?\[?([0-9A-Fa-f:.]+)", re.I)
 
 
@@ -44,14 +56,21 @@ def client_address(record: dict[str, Any]) -> str:
 
 
 def probe_event(record: dict[str, Any]) -> dict[str, Any] | None:
-    """An event for one http.log request whose URI matches PROBE, else None."""
+    """An event for one http.log request whose URI matches PROBE or that was answered 4xx, else None."""
     uri = record.get("uri")
-    if not isinstance(uri, str) or not PROBE.search(uri):
+    status = record.get("status_code")
+    status = status if type(status) is int and 0 <= status <= 999 else None
+    if not isinstance(uri, str) or not uri:
+        return None
+    if PROBE.search(uri):
+        rule = PROBE_RULE
+    elif status is not None and 400 <= status <= 499:
+        rule = CLIENT_ERROR_RULE
+    else:
         return None
     uid, ts = record.get("uid"), record.get("ts")
     if not isinstance(uid, str) or not uid or isinstance(ts, bool) or not isinstance(ts, (int, float)):
         raise ValueError("http.log record lacks uid/ts.")
-    status = record.get("status_code")
     return {
         "event_id": f"{uid}:{int(record.get('trans_depth') or 0)}"[:200],
         "event_time": datetime.fromtimestamp(float(ts), UTC).isoformat(),
@@ -59,9 +78,9 @@ def probe_event(record: dict[str, Any]) -> dict[str, Any] | None:
         "host": str(record.get("host") or "")[:255],
         "method": str(record.get("method") or "")[:16],
         "uri": uri[:512],
-        "status_code": status if type(status) is int and 0 <= status <= 999 else None,
+        "status_code": status,
         "user_agent": str(record.get("user_agent") or "")[:256],
-        "rule": PROBE_RULE,
+        "rule": rule,
     }
 
 
