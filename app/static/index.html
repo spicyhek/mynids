@@ -5,13 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>nids.brendanmanley.com</title>
     <script src="/static/theme.js?v=ui-e-1"></script>
-    <link rel="stylesheet" href="/static/styles.css?v=ui-e-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=ui-e-2" />
   </head>
   <body>
     <header class="gbar">
-      <nav class="gcrumbs" aria-label="Breadcrumb">
-        <a href="/">nids</a><span class="sep" aria-hidden="true">›</span><span class="cur">Network detections</span>
-      </nav>
+      <div class="gtitle">
+        <nav class="gcrumbs" aria-label="Breadcrumb">
+          <a href="/">nids</a><span class="sep" aria-hidden="true">›</span><span class="cur">Network detections</span>
+        </nav>
+        <span class="ver mono" id="app-version" title="App version"></span>
+      </div>
       <span class="spacer"></span>
       <span class="live is-waiting" id="activity-badge" role="status" aria-live="polite">Waiting for data</span>
       <span class="live-age" id="latest-flow"></span>
@@ -220,6 +223,6 @@
     </main>
 
     <div class="tip" id="chart-tip" role="tooltip"></div>
-    <script src="/static/app.js?v=ui-e-2"></script>
+    <script src="/static/app.js?v=ui-e-3"></script>
   </body>
 </html>

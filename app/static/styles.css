@@ -78,6 +78,8 @@ svg.i { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor;
 
 /* ---------- top bar ---------- */
 .gbar { display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
+/* The version sits on the breadcrumb's text baseline; centering would lift its smaller mono text. */
+.gtitle { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
 .gcrumbs { display: flex; align-items: center; gap: 8px; font-size: 14px; min-width: 0; }
 .gcrumbs a { color: var(--text); text-decoration: none; white-space: nowrap; }
 .gcrumbs a:hover { text-decoration: underline; }
@@ -87,6 +89,8 @@ svg.i { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor;
 .live::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
 .live-age { font-size: 13px; color: var(--muted); white-space: nowrap; margin-left: -6px; }
 .live-age:empty { display: none; }
+.ver { font-size: 12px; color: var(--subtle); white-space: nowrap; }
+.ver:empty { display: none; }
 
 /* ---------- toolbar ---------- */
 .gtool { display: flex; align-items: center; gap: 8px; padding: 8px 16px; flex-wrap: wrap; }

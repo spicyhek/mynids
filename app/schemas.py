@@ -184,6 +184,8 @@ class TimeBucket(BaseModel):
 
 class SummaryResponse(BaseModel):
     generated_at: datetime
+    # The app's semantic version (app/VERSION).
+    version: str
     model_name: str
     recent_window_minutes: int
     stale_after_seconds: int
@@ -213,6 +215,7 @@ class SummaryResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
+    version: str
     generated_at: datetime
     model_loaded: bool
     ingest_enabled: bool

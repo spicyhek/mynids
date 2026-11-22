@@ -378,6 +378,18 @@ test("sensors and the model's service date render when reported, and are skipped
   assert.equal(bare.nodes.get("activity-badge").textContent, "Live");
 });
 
+test("the header shows the app version, and nothing for a server without one or a malformed one", async () => {
+  const app = dashboard(async () => ok({ ...summary, version: "1.9.0" }));
+  await settle();
+  assert.equal(app.nodes.get("app-version").textContent, "v1.9.0");
+  for (const version of [undefined, "", "1.9", "<b>1.9.0</b>", 190]) {
+    const other = dashboard(async () => ok({ ...summary, version }));
+    await settle();
+    assert.equal(other.nodes.get("app-version").textContent, "");
+    assert.equal(other.nodes.get("activity-badge").textContent, "Live");
+  }
+});
+
 /** A summary covering `hours` full hours plus the one in progress, 10 benign flows per hour. */
 function longSummary(hours) {
   const end = Date.parse(summary.generated_at);
