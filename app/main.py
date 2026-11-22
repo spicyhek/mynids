@@ -27,6 +27,7 @@ from app.schemas import (EventResponse, FlowBatchRequest, HealthResponse, Ingest
                          WebProbeBatchRequest, WebProbeIngestResponse, WebProbeResponse, WebScanResponse)
 from app.shadow import ICMPV6_REASON, ShadowClassifier, ShadowPrediction
 from app.storage import FlowConflict, PredictionRow, StatsStore, UNVALIDATED
+from app.version import __version__
 
 logger = logging.getLogger(__name__)
 # The Keras model labels every flow when it is operational, and in v2 mode labels the flows v2 cannot
@@ -115,7 +116,7 @@ async def lifespan(_: FastAPI):
         store.close()
 
 
-app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
 app.add_middleware(IngestBodyLimit)
 app.add_middleware(ReleaseHeaders, release_id=lambda: settings.release_id)
 static_dir = Path(__file__).resolve().parent / "static"
@@ -167,7 +168,7 @@ def healthz() -> HealthResponse:
         warnings.append("Shadow model is configured but unavailable.")
     healthy = classifier.loaded and not classifier.load_error and not v2_unavailable()
     return HealthResponse(
-        status="ok" if healthy else "degraded",
+        status="ok" if healthy else "degraded", version=__version__,
         generated_at=datetime.now(UTC), model_loaded=classifier.loaded,
         ingest_enabled=bool(settings.ingest_token), warnings=warnings,
     )
@@ -209,7 +210,7 @@ def public_summary(
                         "flows the model could not judge, such as the first minute after a sensor restart) are "
                         "counted separately from benign and attack predictions.")
     return SummaryResponse(
-        **summary, model_name=operational_model_name(),
+        **summary, version=__version__, model_name=operational_model_name(),
         recent_window_minutes=settings.public_window_minutes,
         retention_hours=settings.retention_hours, stale_after_seconds=settings.stale_after_seconds,
         ingest_enabled=bool(settings.ingest_token), warnings=warnings,

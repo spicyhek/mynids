@@ -98,6 +98,7 @@ Back up before downgrade: older code does not maintain the new deduplication led
 
 `/healthz` is liveness/status; `/readyz` additionally checks storage and returns
 503 when the model is unavailable/degraded or the ingestion token is missing.
+Both report the app version in `version`, as does the public summary.
 `/healthz` also returns the deployed release in `X-Release-ID` (from the
 `RELEASE_ID` environment variable) and `Cache-Control: no-store`, for
 [mybuilds](https://github.com/spicyhek/mybuilds)' public check, which also
@@ -117,6 +118,29 @@ promotion. Both jobs report to mybuilds with the `MYBUILDS_CI_EVENT_SECRET`
 Actions secret; without it they warn and carry on.
 Direct dependencies are pinned; TensorFlow/Keras/scikit-learn versions match
 the saved model and estimator metadata. Transitive dependencies are not fully locked.
+
+## Versioning
+
+The app follows [Semantic Versioning](https://semver.org/). The version is in
+`app/VERSION`; `/healthz`, `/readyz`, the public summary (`version`), the
+OpenAPI docs and the dashboard header report it, and `CHANGELOG.md` lists what
+each version changed. Bump it in the PR that makes the change:
+
+- MAJOR when a caller that worked before would now fail: an older sensor, a
+  reader of the public summary or `/healthz`.
+- MINOR for a new feature, endpoint or field, or a changed default that keeps
+  callers working.
+- PATCH for a bug fix.
+
+Changes to CI, docs or training tools alone need no bump. `app/VERSION` is
+outside the converter paths, so a bump on its own does not restart the Zeek
+converter. After the PR merges, tag its merge commit and push the tag (tags do
+not start a release; images keep their `sha-` tags):
+
+```sh
+git tag -a v1.9.0 <merge commit> -m "mynids 1.9.0"
+git push origin v1.9.0
+```
 
 ## Model verification
 

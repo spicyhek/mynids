@@ -581,7 +581,11 @@ function renderScans(webProbes) {
   }
 }
 
+// A server from before versioning sends none; the header then shows nothing rather than a guess.
+const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
 function renderSystem(data) {
+  setText("app-version", typeof data.version === "string" && VERSION.test(data.version) ? `v${data.version}` : "");
   setText("model-name", data.model_name);
   renderModelSince(data.counter_provenance);
   setText("lifetime-flows", formatCompact(data.lifetime_flows));
