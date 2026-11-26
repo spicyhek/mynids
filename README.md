@@ -1,6 +1,6 @@
 # mynids
 
-This is a Network Intrusion Detection System made for my homelab cluster. It's trained on the CICIDS2018 dataset using a multi-layer perceptron across 9 million rows and 4 classes, getting a validation accuracy of 97% and an averaged f1-score of 0.98.
+This is a Network Intrusion Detection System made for my homelab cluster. Zeek watches the control plane's traffic, and a gradient-boosted tree model (`zeek-conn-window-v2`, trained on homelab captures plus CIC-IDS2017/2018 and IoT-23 imports) labels each connection with five classes: `BENIGN`, `BOTNET`, `BRUTE_FORCE`, `DOS_DDOS` and `OTHER_ATTACK`. Alert-side rules in `app/alert_rules.py` remove the known benign look-alikes, and a request-path rule catches web probes. The first model, a Keras multi-layer perceptron trained on CICIDS2018, was retired from labeling on 2026-11-08 and removed in 2.0.0.
 
 The service has two surfaces:
 
@@ -96,19 +96,23 @@ Historical per-flow packet counts cannot be recovered from a batch total.
 traffic can therefore count it again once; deduplication begins with the new IDs.
 Back up before downgrade: older code does not maintain the new deduplication ledger.
 
-`/healthz` is liveness/status; `/readyz` additionally checks storage and returns
-503 when the model is unavailable/degraded or the ingestion token is missing.
+`/healthz` is liveness/status: `degraded` when the v2 bundle (`NIDS_V2_MODEL_DIR`,
+`NIDS_V2_MODEL_SHA256`) is missing, unloadable or failing, while flows are stored as
+unvalidated. `/readyz` additionally checks storage and returns 503 when storage is
+unavailable or the ingestion token is missing; a missing model does not stop ingestion.
 Both report the app version in `version`, as does the public summary.
 `/healthz` also returns the deployed release in `X-Release-ID` (from the
 `RELEASE_ID` environment variable) and `Cache-Control: no-store`, for
 [mybuilds](https://github.com/spicyhek/mybuilds)' public check, which also
 requires `"status": "ok"`.
-PR checks run the regression suites and actual model smoke test. Container builds
-also execute the smoke test for each target architecture before publication.
+PR checks run the regression suites and the model smoke test, which builds a
+throwaway v2 bundle (the production bundle is private and staged on the node).
+Container builds also execute the smoke test for each target architecture before
+publication.
 
 Pushes to `main` release through `.github/workflows/release.yml`. The `build`
-job tests, builds and smoke-tests the image (`/healthz` must answer `ok` with
-the release headers), pushes it and reads its digest. The `bump-gitops` job
+job tests, builds and smoke-tests the image with a mounted smoke bundle (`/healthz`
+must answer `ok` with the release headers), pushes it and reads its digest. The `bump-gitops` job
 pins that digest in `homelab-infra/k8s/apps/nids/kustomization.yml`, rewrites
 `release-patch.yml` with the release ID (`mynids/<sha7>/production/<run>`),
 and squash-merges the change as `Deploy mynids sha-...` with a `Release-Id:`
@@ -116,8 +120,8 @@ trailer. The Zeek converter keeps a `sha-` tag and moves only when its code
 changed. A run whose commit is no longer the head of `main` skips the
 promotion. Both jobs report to mybuilds with the `MYBUILDS_CI_EVENT_SECRET`
 Actions secret; without it they warn and carry on.
-Direct dependencies are pinned; TensorFlow/Keras/scikit-learn versions match
-the saved model and estimator metadata. Transitive dependencies are not fully locked.
+Direct dependencies are pinned; the scikit-learn version matches the one the v2
+bundle was trained with. Transitive dependencies are not fully locked.
 
 ## Versioning
 
@@ -152,15 +156,11 @@ node --test tests/dashboard.test.cjs
 .\.venv\Scripts\python.exe -m tools.smoke_model
 ```
 
-For labeled JSONL with `label`, `source`, and either `conn` or `flow`, use
-`python -m tools.evaluate_replay dataset.jsonl --output report.json`.
-
-`tools.verify_model` also accepts the reviewed CICIDS2018 CSVs from the
-`primus11/cic-ids-2018-dataset` and `solarmainframe/ids-intrusion-csv` Kaggle datasets:
-
-```powershell
-.\.venv\Scripts\python.exe -m tools.verify_model --csv data/evaluation/cic.csv data/evaluation/solarmainframe/02-15-2018.csv data/evaluation/solarmainframe/02-21-2018.csv data/evaluation/solarmainframe/03-02-2018.csv --output-dir data/evaluation/all-classes
-```
+`tools.smoke_model` builds a throwaway v2 bundle and classifies converter flows
+through the app's validation and model code; `--write-bundle DIR` only writes the
+bundle and prints its SHA-256 (the release smoke test mounts it). Candidate v2
+models are trained and scored with `tools/train_tree_model.py`; see
+`training/FEATURE_CONTRACT_V2.md`.
 
 ## Retraining baseline and dataset preparation
 
@@ -169,13 +169,12 @@ follow `training/CAPTURE_GUIDE.md`. It pairs full-packet Linux capture with UTC
 activity markers, command outcomes, capture-quality checks and a sealed hash
 manifest. Activities remain unreviewed until matched to protocol evidence.
 
-The offline retraining tools keep the existing input shape `(N, 80)`. The default
-class map has four outputs; `training/labels.five-class.json` defines a separate
-five-output candidate with `BRUTE_FORCE` distinct from `OTHER_ATTACK`. The root
-production model and its four-class map remain unchanged. Training uses the production Zeek converter for every source;
-original CICFlowMeter feature CSVs are not accepted by this preparation path.
-Observation times remain in metadata, while the model timestamp column is set
-to zero before fitting the new scaler and during inference.
+Dataset preparation also supports the original 80-feature `zeek-conn-v1`
+contract (root `feature_order.json` and `label_map.json`, which every flow still
+carries for identity and validation). `training/labels.five-class.json` defines the
+five classes, with `BRUTE_FORCE` distinct from `OTHER_ATTACK`. Training uses the
+production Zeek converter for every source; original CICFlowMeter feature CSVs are
+not accepted by this preparation path. Observation times remain in metadata.
 
 Keep private captures, label evidence, prepared datasets, and candidate model
 bundles under gitignored `data/`. Commit reusable tools, reviewed configuration
@@ -369,34 +368,10 @@ manifests retain original/derivative hashes and exact discarded lengths.
 
 ### Train a separate candidate
 
-Once reviewed data covers every class in both training and validation:
-
-```powershell
-.\.venv\Scripts\python.exe -m tools.train_model `
-  data/datasets/nids-v1-prepared --output data/models/candidate-001 `
-  --epochs 50 --batch-size 256 --patience 5 --seed 20261029
-```
-
-Training refuses incomplete class coverage before loading TensorFlow or creating
-candidate output. It fits a fresh scaler and class weights on training data only,
-uses validation loss for early stopping, and trains an `80 -> 128 -> 64 -> C`
-dense baseline with dropout. The initial implementation loads reviewed records
-into memory; use an explicitly documented, reproducible subset for large corpora.
-
-The separate bundle contains the model, scaler, label encoder, feature order,
-label map, and a report with dataset/code/artifact hashes, package versions,
-configuration, and validation/regression metrics. It is reloaded and scored
-through the actual production classifier to check compatibility. Test records
-do not influence scaling, class weights, optimization, or early stopping, and
-are not automatically scored. Deterministic settings and seeds are recorded;
-cross-platform bit-for-bit reproducibility is not guaranteed.
-
-The tools do not replace the root model files or deploy a candidate. Compare
-against the existing model on whole held-out sessions before promotion. ICMPv6
-continues to use the existing operational unvalidated policy.
-`C` comes from the candidate class map. Before deploying a five-class candidate,
-the dashboard's class list/cards must also be updated to display `BRUTE_FORCE`.
-Training does not perform that production change automatically.
+v2 candidates are trained with `tools/train_tree_model.py` on a prepared
+`zeek-conn-window-v2` dataset (`training/FEATURE_CONTRACT_V2.md`). The Keras
+trainer (`tools/train_model.py`) was removed with the Keras model in 2.0.0; its
+history is in git.
 
 The current local development corpus is `data/datasets/nids-v4`, with its recipe
 alongside it and a dataset card inside it. It has 49,761 training, 13,514 validation,

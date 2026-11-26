@@ -9,10 +9,8 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app import main
-from app.inference import ModelArtifacts
 from app.version import SEMVER, VERSION_FILE, __version__, read_version
 
-LABELS = ["BENIGN", "BOTNET", "DOS_DDOS", "OTHER_ATTACK"]
 
 
 class VersionFileTests(unittest.TestCase):
@@ -42,7 +40,6 @@ class VersionApiTests(unittest.TestCase):
         self.addCleanup(temp_dir.cleanup)
         settings = replace(main.settings, db_path=Path(temp_dir.name) / "nids.sqlite3", ingest_token="test-token")
         self.enterContext(patch.object(main, "settings", settings))
-        self.enterContext(patch.object(main.classifier, "load", return_value=ModelArtifacts(LABELS, [])))
         self.client = self.enterContext(TestClient(main.app))
 
     def test_health_summary_and_openapi_report_the_version(self) -> None:

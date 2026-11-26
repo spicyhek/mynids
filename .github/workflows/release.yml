@@ -75,19 +75,26 @@ jobs:
           tags: mynids:smoke
           platforms: linux/amd64
 
-      # The image runs with the built-in Keras model only: the v2 bundle is
-      # staged on the node, not in the image. That is enough to prove the API
-      # starts and returns the release headers mybuilds checks.
+      # The production v2 bundle is staged on the node, not in the image, so the
+      # smoke test mounts a throwaway bundle the image builds itself. That is
+      # enough to prove the API starts, loads a model and returns the release
+      # headers mybuilds checks.
       - name: Smoke test
         env:
           RELEASE_ID: ${{ steps.release.outputs.id }}
         run: |
           set -euo pipefail
 
+          mkdir -p smoke-model
+          SMOKE_SHA="$(docker run --rm --user "$(id -u):$(id -g)" \
+            --volume "${PWD}/smoke-model:/smoke-model" mynids:smoke \
+            python -m tools.smoke_model --write-bundle /smoke-model/v2 | tail -n 1)"
+
           docker run --detach --name smoke --publish 127.0.0.1:8080:8080 \
+            --volume "${PWD}/smoke-model:/models:ro" \
+            --env NIDS_V2_MODEL_DIR=/models/v2 --env NIDS_V2_MODEL_SHA256="${SMOKE_SHA}" \
             --env RELEASE_ID="${RELEASE_ID}" --env NIDS_INGEST_TOKEN=smoke mynids:smoke
 
-          # Loading TensorFlow and the model takes a while on a runner.
           if ! curl --fail --silent --show-error \
               --retry 60 --retry-all-errors --retry-delay 2 \
               --dump-header headers.txt --output health.json \

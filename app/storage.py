@@ -290,11 +290,11 @@ class StatsStore:
                     (f"{previous['value']} -> {name} at {utcnow().isoformat().replace('+00:00', 'Z')}",))
 
     def operational_model_counts(self, history_hours: int) -> dict[str, int]:
-        """Stored flows per model whose label they carry, over the window (rows from before recording: 'unrecorded')."""
+        """Stored flows per model (and alert rule) whose label they carry; 'unlabeled' for flows no model judged."""
         cutoff = to_sqlite_dt(utcnow() - timedelta(hours=history_hours))
         with self._lock:
             return {str(row["model"]): int(row["total"]) for row in self._connection.execute(
-                """SELECT COALESCE(model_id, 'unrecorded') AS model, COUNT(*) AS total
+                """SELECT COALESCE(model_id, 'unlabeled') AS model, COUNT(*) AS total
                    FROM classified_events WHERE observed_at >= ? GROUP BY 1 ORDER BY 2 DESC""", (cutoff,))}
 
     def close(self) -> None:
@@ -313,7 +313,10 @@ class StatsStore:
         created_at = to_sqlite_dt(utcnow())
         counts: Counter[str] = Counter()
         for row in rows:
-            if row.predicted_label not in self._labels or not math.isfinite(row.confidence) or not 0 <= row.confidence <= 1:
+            # A flow no model judged is stored unvalidated with the UNVALIDATED placeholder label.
+            unjudged = row.predicted_label == UNVALIDATED and row.validation_status == "unvalidated"
+            if ((row.predicted_label not in self._labels and not unjudged)
+                    or not math.isfinite(row.confidence) or not 0 <= row.confidence <= 1):
                 raise ValueError("Invalid prediction label or confidence.")
             if row.observed_at.tzinfo is None:
                 raise ValueError("Prediction timestamp must include a timezone.")

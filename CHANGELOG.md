@@ -5,7 +5,22 @@ The app follows [Semantic Versioning](https://semver.org/); README.md (Versionin
 rules to the merged pull requests in order, and are not tagged. Pull requests that changed only CI, docs or
 training tools (#1, #2, #11, #13, #16) are not listed.
 
-## 1.10.0 (unreleased)
+## 2.0.0 (unreleased)
+
+- The Keras model is removed. It had not labeled flows since v2 became operational (2026-11-08), but it still ran
+  on every flow, wrote shadow rows and gated readiness. The v2 tree bundle is now the only model, and TensorFlow,
+  the Keras weights, scaler and encoder, and the Keras-only tools (`train_model`, `evaluate_replay`,
+  `verify_model`) are gone, so the image no longer installs TensorFlow.
+- Major, because a deployment that worked before can now fail: `NIDS_OPERATIONAL_MODEL=keras` or
+  `NIDS_V2_UNDECIDED=keras` stops the app at startup, and an image run without `NIDS_V2_MODEL_DIR` no longer has a
+  built-in model, so `/healthz` is `degraded` and every flow is stored unvalidated. The v2-only values still start,
+  and the sensor contract is unchanged.
+- Flows v2 cannot judge are stored with label `UNVALIDATED`, confidence 0 and no `model_id` (they used to keep
+  the Keras label). `/readyz` no longer depends on a model. `/api/internal/shadow/summary` reports
+  `operational_model_id` and `operational_label_sources` (`unlabeled` for flows no model judged).
+- `tools/smoke_model.py` builds a throwaway v2 bundle; CI, the image build and the release smoke test use it.
+
+## 1.10.0 (2026-11-25)
 
 - New alert rule: a v2 attack label on a lone refused or aborted TCP attempt (no payload, at most 3 packets,
   `REJ` or an originator reset right after the handshake, from a source that is not scanning or flooding) is

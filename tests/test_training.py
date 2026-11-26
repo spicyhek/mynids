@@ -1,4 +1,4 @@
-"""Data provenance, split isolation, and production preprocessing for retraining."""
+"""Data provenance and split isolation for retraining."""
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -7,9 +7,8 @@ import unittest
 
 import numpy as np
 
-from tools.training_data import (ROOT, contract, fit_preprocessing, load_prepared, model_matrix,
-                                 prepare, require_training_coverage, sha256)
-from tools.train_model import train
+from tools.training_data import (ROOT, contract, load_prepared, model_matrix, prepare, require_training_coverage,
+                                 sha256)
 
 
 class TrainingDataTests(unittest.TestCase):
@@ -64,24 +63,6 @@ class TrainingDataTests(unittest.TestCase):
         self.assertNotEqual(records[0]["flow"]["features"]["timestamp"], 0)
         with self.assertRaisesRegex(ValueError, "every class in both train and validation"):
             require_training_coverage(records, self.schema["labels"])
-        with self.assertRaisesRegex(ValueError, "every class in both train and validation"):
-            train(output, self.directory / "candidate", epochs=1)
-        self.assertFalse((self.directory / "candidate").exists())
-
-    def test_scaler_uses_training_only_and_keeps_timestamp_constant_zero(self):
-        output = self.directory / "prepared"
-        prepare(self.complete_recipe(), output)
-        records, manifest = load_prepared(output)
-        scaler, encoder, matrix, targets = fit_preprocessing(records, manifest["contract"])
-        train_matrix = matrix[[i for i, row in enumerate(records) if row["split"] == "train"]]
-        np.testing.assert_allclose(scaler.mean_, train_matrix.mean(axis=0, dtype=np.float64))
-        index = self.schema["feature_order"].index("totlen_fwd_pkts")
-        self.assertLess(scaler.mean_[index], matrix[:, index].mean())
-        index = self.schema["feature_order"].index("timestamp")
-        self.assertEqual(scaler.mean_[index], 0)
-        self.assertEqual(scaler.var_[index], 0)
-        self.assertEqual(list(encoder.classes_), self.schema["labels"])
-        self.assertEqual(set(targets), {0, 1, 2, 3})
 
     def test_group_cannot_cross_splits_even_with_different_observations(self):
         recipe = self.recipe([("train", "same-capture", [self.row()]),
@@ -140,8 +121,6 @@ class TrainingDataTests(unittest.TestCase):
         sentinel.write_text("preserve")
         with self.assertRaisesRegex(ValueError, "already exists"):
             prepare(self.recipe([("regression", "capture", [self.row()])]), output)
-        with self.assertRaisesRegex(ValueError, "already exists"):
-            train(self.directory / "unused", output)
         self.assertEqual(sentinel.read_text(), "preserve")
 
     def test_overflow_is_rejected_before_timestamp_normalization(self):
@@ -167,12 +146,10 @@ class TrainingDataTests(unittest.TestCase):
         recipe_path.write_text(json.dumps(recipe))
         output = self.directory / "prepared-five"
         manifest = prepare(recipe_path, output)
-        rows, loaded = load_prepared(output)
+        _, loaded = load_prepared(output)
         self.assertEqual(loaded["contract"]["labels"], labels)
         self.assertTrue(manifest["ready_for_training"])
         self.assertFalse(manifest["ready_for_four_class_training"])
-        _, encoder, _, _ = fit_preprocessing(rows, loaded["contract"])
-        self.assertEqual(list(encoder.classes_), labels)
         self.assertEqual(sha256(ROOT / "label_map.json"), original_hash)
 
     def test_sampling_is_reproducible_and_does_not_move_capture_between_splits(self):

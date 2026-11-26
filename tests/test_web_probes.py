@@ -16,12 +16,10 @@ from datetime import UTC, datetime, timedelta
 from fastapi.testclient import TestClient
 
 from app import main
-from app.inference import ModelArtifacts
 from app.web_scans import group_scans
 from sensor.web_probes import client_address, deliver_probes, probe_event, web_probe_endpoint
 from sensor.zeek_to_cicids import export_log_once, load_state
 
-LABELS = ["BENIGN", "BOTNET", "DOS_DDOS", "OTHER_ATTACK"]
 NOW = time.time()
 REQUEST = {"ts": NOW - 60, "uid": "CprobeA", "id.orig_h": "10.42.1.129", "id.orig_p": 40014,
            "id.resp_h": "10.42.0.215", "id.resp_p": 80, "trans_depth": 3, "method": "GET",
@@ -195,7 +193,6 @@ class WebProbeApiTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         settings = replace(main.settings, db_path=Path(temporary.name) / "nids.sqlite3", ingest_token="test-token")
         self.enterContext(patch.object(main, "settings", settings))
-        self.enterContext(patch.object(main.classifier, "load", return_value=ModelArtifacts(LABELS, [])))
         self.client = self.enterContext(TestClient(main.app))
         self.headers = {"X-Ingest-Token": "test-token"}
 

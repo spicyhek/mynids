@@ -12,15 +12,11 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 COPY app ./app
 COPY sensor ./sensor
 COPY tools ./tools
-COPY meta.json ./
-COPY config.json ./
 COPY feature_order.json ./
 COPY label_map.json ./
-COPY label_encoder.joblib ./
-COPY scaler.joblib ./
-COPY cicids2018_dense_model.keras ./
 
-# Every target architecture must load and execute the actual artifacts before publishing.
+# Every target architecture must load and run a v2 tree bundle before publishing. The production bundle is
+# private and staged on the node (NIDS_V2_MODEL_DIR), so this builds a throwaway one.
 RUN python -m tools.smoke_model
 
 EXPOSE 8080

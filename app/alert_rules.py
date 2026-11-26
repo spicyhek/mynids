@@ -26,7 +26,7 @@ LONE_SYN_RULE_ID = "lone-syn-rule"
 # unanswered SYNs live, and regular small HTTP GETs to :8080 in the 2026-11-10 held-out test (30 of 46 benign false
 # alarms), which look like the Ares C2 polls in its training data.
 BOTNET_REASON = "botnet_detection_not_validated"
-# Why v2 could not judge a flow in v2 mode (stored as unvalidated rather than taking the Keras fallback label).
+# Why v2 could not judge a flow (stored as unvalidated).
 NO_V2_FEATURES_REASON = "no_v2_features"
 V2_UNAVAILABLE_REASON = "v2_unavailable"
 MAX_SAME_SERVICE_CONNS = 10
