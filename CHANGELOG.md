@@ -5,6 +5,19 @@ The app follows [Semantic Versioning](https://semver.org/); README.md (Versionin
 rules to the merged pull requests in order, and are not tagged. Pull requests that changed only CI, docs or
 training tools (#1, #2, #11, #13, #16) are not listed.
 
+## 1.10.0 (unreleased)
+
+- New alert rule: a v2 attack label on a lone refused or aborted TCP attempt (no payload, at most 3 packets,
+  `REJ` or an originator reset right after the handshake, from a source that is not scanning or flooding) is
+  stored as BENIGN with `model_id` `<v2 id>+refused-attempt-rule`. It clears the false alerts on DNS retries over
+  TCP that the router refuses and on Tailscale DERP probes cut short. `NIDS_SUPPRESS_REFUSED_ATTEMPTS=false`
+  turns it off.
+- Successful SSH logins are not alerts: with `NIDS_SSH_LOG_PATH` set, the converter marks flows whose login Zeek's
+  `ssh.log` saw succeed (`ssh_auth_success`, a new optional flow field), and the app stores attack labels on them
+  as BENIGN with `model_id` `<v2 id>+ssh-auth-rule`. This clears the BRUTE_FORCE and DOS_DDOS alerts on bursts of
+  the operator's own logins. `NIDS_SUPPRESS_AUTHENTICATED_SSH=false` turns it off; a server without the field
+  gets the flows resent without it.
+
 ## 1.9.0 (2026-11-22)
 
 - Web scans: the sensor also exports every 4xx answer, the probe-path rule (`probe-path-v2`) covers any dotfile

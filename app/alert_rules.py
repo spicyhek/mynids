@@ -54,6 +54,70 @@ def is_lone_unanswered_syn(features: Mapping[str, float]) -> bool:
         return False  # Not a v2 vector; never suppress what the rule cannot judge.
 
 
+# Lone refused or aborted attempt: a TCP connection that carried no payload either way and ended within 3 packets,
+# either refused by the responder (conn_state REJ, history "Sr") or reset by the originator right after the
+# handshake (RSTO, history "ShR"). Like a lone unanswered SYN it is one failed attempt, not an attack, unless the
+# source is scanning or flooding, which the window checks catch. Live false positives it clears (2026-11-25):
+# OTHER_ATTACK on the control plane's DNS retries over TCP that the router refuses (11-15 same-service
+# connections, because UDP queries to the same resolver count too), and DOS_DDOS on a Tailscale DERP probe the
+# client cut short (21 same-service connections, 10 destination hosts and 5 ports from the busy control plane).
+#
+# The thresholds sit above those cases and below scans and floods. In the training data a homelab SYN flood source
+# reaches a median of 752 same-service connections a window and a homelab port scan a median of 66 ports; only the
+# first few attempts of each burst fall under the limits, and the rest still alert.
+REFUSED_RULE_ID = "refused-attempt-rule"
+REFUSED_MAX_PKTS = 3
+REFUSED_MAX_SAME_SERVICE_CONNS = 30
+REFUSED_MAX_DISTINCT_DST_HOSTS = 20
+REFUSED_MAX_DISTINCT_DST_PORTS = 5
+REFUSED_MAX_DST_DISTINCT_SRC_HOSTS = 2
+_REFUSED_ALLOWED_HISTORY = frozenset({"hist_orig_S", "hist_orig_R", "hist_resp_h", "hist_resp_r"})
+_ALL_HISTORY_FEATURES = (
+    *(f"hist_orig_{letter}" for letter in ("S", "H", "A", "D", "F", "R", "C", "G", "T", "W", "I", "Q", "flip")),
+    *(f"hist_resp_{letter}" for letter in "shadfrcgtwiq"),
+)
+
+
+def is_lone_refused_attempt(features: Mapping[str, float]) -> bool:
+    """True for a zeek-conn-window-v2 vector of a lone refused or aborted TCP attempt (see the comment above)."""
+    try:
+        if features["protocol"] != 6 or features["fwd_payload_bytes"] or features["bwd_payload_bytes"]:
+            return False
+        if features["tot_fwd_pkts"] + features["tot_bwd_pkts"] > REFUSED_MAX_PKTS or features["hist_orig_S"] < 1:
+            return False
+        refused = features["conn_state_REJ"] == 1 and features["hist_resp_r"] >= 1
+        aborted = (features["conn_state_RSTO"] == 1 and features["hist_resp_h"] >= 1
+                   and features["hist_orig_R"] >= 1)
+        if not (refused or aborted):
+            return False
+        if any(features[name] for name in _ALL_HISTORY_FEATURES if name not in _REFUSED_ALLOWED_HISTORY):
+            return False
+        return (features["src_same_service_conns"] <= REFUSED_MAX_SAME_SERVICE_CONNS
+                and features["src_distinct_dst_hosts"] <= REFUSED_MAX_DISTINCT_DST_HOSTS
+                and features["src_distinct_dst_ports"] <= REFUSED_MAX_DISTINCT_DST_PORTS
+                and features["dst_distinct_src_hosts"] <= REFUSED_MAX_DST_DISTINCT_SRC_HOSTS)
+    except (KeyError, TypeError):
+        return False  # Not a v2 vector; never suppress what the rule cannot judge.
+
+
+# Authenticated SSH: the sensor flags a connection whose SSH login Zeek's analyzer saw succeed
+# (sensor/ssh_auth.py). The model cannot see login results, so bursts of the operator's own key-authenticated
+# sessions to the control plane look like password guessing: 6 sessions in 65 s raised BRUTE_FORCE on
+# 2026-11-25, and on live-regression-v1 10 of the 14 alerts left after the other rules were such sessions
+# (BRUTE_FORCE, and DOS_DDOS when Windows ssh ended them with a reset). Zeek set auth_success on none of the
+# ~96,000 guessing sessions in the training data, and on 139 of 140 live sessions (the 140th was a real failed
+# login, which still alerts).
+#
+# Accepted blind spot: a successful login is never an alert by itself, including the one that ends a guessing
+# run; the failed guesses before it still alert. Logins with stolen credentials were never detectable here.
+SSH_AUTH_RULE_ID = "ssh-auth-rule"
+
+
+def is_authenticated_ssh(flow: Mapping) -> bool:
+    """True for a flow the sensor marked as a successful SSH login (see the comment above)."""
+    return flow.get("ssh_auth_success") is True
+
+
 # Routine ICMPv6: IPv6 neighbor discovery, multicast listener reports, pings and error messages are ~10 % of live
 # flows (2026-11-16..17: 40,351 of 373,509) and were all stored unvalidated, because neither model was trained on
 # ICMPv6 attacks: baseline-v2's ICMPv6 training rows are 8,895 benign homelab flows, so its label there is always

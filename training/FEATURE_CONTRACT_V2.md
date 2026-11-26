@@ -234,6 +234,48 @@ Implemented locally; nothing is deployed.
   - Each relabeled row carries `model_id` `<v2 id>+lone-syn-rule`, so
     `operational_label_sources` counts suppressions. The original label and
     confidence go to the pod log as a `Suppressed …` warning.
+- **Lone refused attempt rule** (v2 mode only; `NIDS_SUPPRESS_REFUSED_ATTEMPTS`,
+  default `true`, set `false` to disable). A v2 attack label on a TCP connection
+  with no payload either way and at most 3 packets, refused by the responder
+  (`conn_state` REJ, history `Sr`) or reset by the originator right after the
+  handshake (RSTO, history `ShR`), from a source that is not scanning or flooding
+  in its window, is stored as BENIGN instead.
+  - Why: live, v2 raised OTHER_ATTACK on the control plane's DNS retries over TCP
+    that the router refuses, and DOS_DDOS on Tailscale DERP probes the client cut
+    short (2026-11-25). Both are single failed attempts from a busy host.
+  - Cost: the first attempts of a scan or flood, before its window counts pass the
+    limits, are not alerted; the rest are. In the lab drills that is 5 of 129 scan
+    probes and 25 of 1,500 flood connections. A compromised host whose command
+    server refuses its callbacks is alerted only once it retries past the limits
+    (CIC-IDS2017 infiltration: the first 15 of 21 refused callbacks).
+  - Live regression (70 h): 17 → 14 alerts, exactly the 3 Tailscale netcheck
+    false positives; the web-probe detections are untouched.
+  - Thresholds and rationale are in `app/alert_rules.py`. Relabeled rows carry
+    `model_id` `<v2 id>+refused-attempt-rule` and log a `Suppressed …` warning.
+- **Successful SSH login rule** (v2 mode only; `NIDS_SUPPRESS_AUTHENTICATED_SSH`,
+  default `true`). The converter, with `--ssh-log-path` or `NIDS_SSH_LOG_PATH`
+  (off when unset), reads Zeek's `ssh.log` into an in-memory index before each
+  conn.log pass and sends `ssh_auth_success: true` on flows whose login Zeek
+  saw succeed (`sensor/ssh_auth.py`). A v2 attack label on such a flow is stored
+  as BENIGN with `model_id` `<v2 id>+ssh-auth-rule`.
+  - Why: the model cannot see login results, so bursts of the operator's own
+    key-authenticated sessions look like password guessing (BRUTE_FORCE, and
+    DOS_DDOS when Windows ssh resets the connection). They were 10 of the 14
+    alerts left on live-regression-v1, the live alerts of 2026-11-24 and
+    2026-11-25, and the 7 benign false alarms left in the 2026-11-10 held-out
+    session.
+  - Evidence: Zeek set `auth_success` on none of the ~96,000 guessing sessions in
+    the training data (homelab hydra drills, CIC-IDS2017/2018 patator) and on
+    139 of 140 live sessions from 2026-11-12 to 11-25; the 140th was a real
+    failed login. Every successful login in the drills and imports is labeled
+    BENIGN. Replayed with the retained `ssh.log` files, the rules clear all six
+    live alerts of 2026-11-24 07Z and 2026-11-25 21Z.
+  - Accepted blind spot: a successful login never alerts by itself, including the
+    one that ends a guessing run; the failed guesses before it still alert.
+  - A flag missing because ssh.log was not on disk yet just means the flow is
+    judged as before. An older server answers 422 to the field, and the
+    converter resends the batch without it, so the rollout order does not
+    matter. The index is rebuilt from the current ssh.log on every start.
 - **Undecided flows are unvalidated** (v2 mode only; `NIDS_V2_UNDECIDED`, default
   `unvalidated`, or `keras` for the old fallback). A flow v2 does not judge is
   stored unvalidated with its reason, instead of taking the Keras label:
