@@ -48,6 +48,12 @@ class Settings:
     operational_model: str = os.getenv("NIDS_OPERATIONAL_MODEL", "keras").strip().lower()
     # v2 mode only: relabel lone unanswered SYNs BENIGN instead of alerting (app/alert_rules.py).
     suppress_lone_unanswered_syn: str = os.getenv("NIDS_SUPPRESS_LONE_UNANSWERED_SYN", "true").strip().lower()
+    # v2 mode only: relabel lone refused (REJ) or originator-aborted (RSTO after the handshake) TCP attempts with no
+    # payload BENIGN instead of alerting (app/alert_rules.py is_lone_refused_attempt).
+    suppress_refused_attempts: str = os.getenv("NIDS_SUPPRESS_REFUSED_ATTEMPTS", "true").strip().lower()
+    # v2 mode only: relabel attack labels on connections whose SSH login Zeek saw succeed BENIGN instead of alerting
+    # (app/alert_rules.py is_authenticated_ssh; the sensor sends the flag when NIDS_SSH_LOG_PATH is set).
+    suppress_authenticated_ssh: str = os.getenv("NIDS_SUPPRESS_AUTHENTICATED_SSH", "true").strip().lower()
     # v2 mode only: store routine ICMPv6 (neighbor discovery, MLD, pings, errors at normal volume) as BENIGN
     # instead of unvalidated (app/alert_rules.py is_routine_icmpv6).
     validate_routine_icmpv6: str = os.getenv("NIDS_VALIDATE_ROUTINE_ICMPV6", "true").strip().lower()
@@ -65,6 +71,10 @@ class Settings:
     def __post_init__(self) -> None:
         if self.suppress_lone_unanswered_syn not in ("true", "false"):
             raise ValueError("NIDS_SUPPRESS_LONE_UNANSWERED_SYN must be 'true' or 'false'.")
+        if self.suppress_refused_attempts not in ("true", "false"):
+            raise ValueError("NIDS_SUPPRESS_REFUSED_ATTEMPTS must be 'true' or 'false'.")
+        if self.suppress_authenticated_ssh not in ("true", "false"):
+            raise ValueError("NIDS_SUPPRESS_AUTHENTICATED_SSH must be 'true' or 'false'.")
         if self.validate_routine_icmpv6 not in ("true", "false"):
             raise ValueError("NIDS_VALIDATE_ROUTINE_ICMPV6 must be 'true' or 'false'.")
         if self.v2_undecided not in ("unvalidated", "keras"):

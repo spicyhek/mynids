@@ -1,10 +1,11 @@
-"""Alert-side rule: lone unanswered SYNs are not alerts; scans, floods and answered connections still are."""
+"""Alert-side rules: lone unanswered SYNs and lone refused or aborted attempts are not alerts; scans, floods and
+connections that carried data still are."""
 from __future__ import annotations
 
 from dataclasses import replace
 import unittest
 
-from app.alert_rules import is_lone_unanswered_syn, is_routine_icmpv6
+from app.alert_rules import is_lone_refused_attempt, is_lone_unanswered_syn, is_routine_icmpv6
 from app.config import Settings
 from sensor.zeek_features_v2 import Extractor
 from sensor.zeek_to_cicids import conn_record_to_flow
@@ -64,6 +65,70 @@ class LoneUnansweredSynTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "NIDS_BOTNET_ALERTS"):
             replace(Settings(), botnet_alerts="off")
         self.assertEqual((Settings().v2_undecided, Settings().botnet_alerts), ("unvalidated", "unvalidated"))
+
+
+# Live false positives from 2026-11-25 21:00Z, as the sensor logged them: the control plane's DNS retry over TCP
+# that the router refused (OTHER_ATTACK), and a Tailscale DERP probe the client reset after the handshake (DOS_DDOS).
+DNS_REJ = {"ts": 1795643383.142484, "uid": "Crej", "id.orig_h": "2600:1700:38c0:a2e0::524", "id.orig_p": 52974,
+           "id.resp_h": "2600:1700:38c0:a2e0::1", "id.resp_p": 53, "proto": "tcp", "duration": 0.000954,
+           "orig_bytes": 0, "resp_bytes": 0, "conn_state": "REJ", "missed_bytes": 0, "history": "Sr",
+           "orig_pkts": 1, "orig_ip_bytes": 84, "resp_pkts": 1, "resp_ip_bytes": 60}
+DERP_RST = {"ts": 1795643235.844135, "uid": "Cderp", "id.orig_h": "192.168.1.122", "id.orig_p": 34098,
+            "id.resp_h": "192.73.240.121", "id.resp_p": 80, "proto": "tcp", "duration": 0.0462, "orig_bytes": 0,
+            "resp_bytes": 0, "conn_state": "RSTO", "missed_bytes": 0, "history": "ShR", "orig_pkts": 2,
+            "orig_ip_bytes": 100, "resp_pkts": 1, "resp_ip_bytes": 60}
+
+
+class LoneRefusedAttemptTests(unittest.TestCase):
+    def test_live_false_positives_match(self):
+        self.assertTrue(is_lone_refused_attempt(features(DNS_REJ)))
+        self.assertTrue(is_lone_refused_attempt(features(DERP_RST)))
+        # UDP queries to the same resolver count as the same service; a few dozen a minute still match.
+        queries = [{**DNS_REJ, "uid": f"Cq{i}", "ts": DNS_REJ["ts"] - 50 + 2 * i, "proto": "udp", "history": "Dd",
+                    "conn_state": "SF", "orig_bytes": 40, "resp_bytes": 120} for i in range(20)]
+        retries = [{**DNS_REJ, "uid": f"Cr{i}", "ts": DNS_REJ["ts"] + i / 100, "id.orig_p": 52974 + i}
+                   for i in range(6)]
+        self.assertTrue(is_lone_refused_attempt(features(*queries, *retries)))
+        # The DERP probe came in a burst of successful checks to the same relay.
+        checks = [{**DERP_RST, "uid": f"Cc{i}", "ts": DERP_RST["ts"] - 5 + i / 4, "conn_state": "SF",
+                   "history": "ShADadFf", "orig_pkts": 6, "resp_pkts": 5, "orig_bytes": 120, "resp_bytes": 200}
+                  for i in range(20)]
+        self.assertTrue(is_lone_refused_attempt(features(*checks, DERP_RST)))
+
+    def test_floods_and_scans_do_not_match(self):
+        flood = [{**DNS_REJ, "uid": f"C{i}", "ts": DNS_REJ["ts"] + i / 100, "id.orig_p": 40000 + i}
+                 for i in range(40)]
+        self.assertFalse(is_lone_refused_attempt(features(*flood)))
+        port_scan = [{**DNS_REJ, "uid": f"C{i}", "ts": DNS_REJ["ts"] + i / 10, "id.resp_p": 1 + i} for i in range(8)]
+        self.assertFalse(is_lone_refused_attempt(features(*port_scan)))
+        host_sweep = [{**DERP_RST, "uid": f"C{i}", "ts": DERP_RST["ts"] + i / 10, "id.resp_h": f"203.0.113.{i}"}
+                      for i in range(25)]
+        self.assertFalse(is_lone_refused_attempt(features(*host_sweep)))
+        many_sources = [{**DNS_REJ, "uid": f"C{i}", "ts": DNS_REJ["ts"] + i / 10,
+                         "id.orig_h": f"2600:1700:38c0:a2e0::{i + 10:x}"} for i in range(3)]
+        self.assertFalse(is_lone_refused_attempt(features(*many_sources)))
+
+    def test_other_connection_shapes_do_not_match(self):
+        for change in ({"conn_state": "S0", "history": "S", "resp_pkts": 0, "resp_ip_bytes": 0},  # lone-SYN rule's
+                       {"conn_state": "RSTO", "history": "ShADadR", "orig_pkts": 8, "resp_pkts": 8,
+                        "orig_bytes": 300, "resp_bytes": 900},  # a session that carried data
+                       {"conn_state": "RSTO", "history": "ShR", "orig_pkts": 3, "resp_pkts": 2},  # over 3 packets
+                       {"conn_state": "RSTO", "history": "ShAR", "orig_pkts": 2},  # ACKed before the reset
+                       {"conn_state": "RSTR", "history": "Shr", "orig_pkts": 1, "resp_pkts": 2},  # responder reset
+                       {"conn_state": "SF", "history": "ShAFf", "orig_pkts": 3, "resp_pkts": 2},
+                       {"proto": "udp", "conn_state": "SF", "history": "Dd"}):
+            with self.subTest(change=change):
+                self.assertFalse(is_lone_refused_attempt(features({**DNS_REJ, **change})))
+
+    def test_vectors_it_cannot_judge_never_match(self):
+        vector = features(DNS_REJ)
+        del vector["dst_distinct_src_hosts"]
+        self.assertFalse(is_lone_refused_attempt(vector))
+
+    def test_setting_must_be_true_or_false(self):
+        with self.assertRaisesRegex(ValueError, "NIDS_SUPPRESS_REFUSED_ATTEMPTS"):
+            replace(Settings(), suppress_refused_attempts="on")
+        self.assertEqual(Settings().suppress_refused_attempts, "true")
 
 
 # A neighbor solicitation to a solicited-node multicast address, as the live sensor logs it (type in id.orig_p).

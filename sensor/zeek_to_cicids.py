@@ -85,6 +85,10 @@ def parse_args() -> argparse.Namespace:
         help="Zeek http.log to scan for web probes (upgrade the server first); off when unset.",
     )
     parser.add_argument(
+        "--ssh-log-path", default=os.getenv("NIDS_SSH_LOG_PATH") or None,
+        help="Zeek ssh.log; flows of successful SSH logins carry ssh_auth_success (sensor/ssh_auth.py). Off when unset.",
+    )
+    parser.add_argument(
         "--web-probe-endpoint", default=os.getenv("NIDS_WEB_PROBE_ENDPOINT") or None,
         help="Web-probe ingestion endpoint; defaults to web-probes beside --endpoint.",
     )
@@ -406,6 +410,12 @@ def without_v2(flows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{key: value for key, value in flow.items() if key not in V2_FIELDS} for flow in flows]
 
 
+def without_ssh_auth(flows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from sensor.ssh_auth import FIELD
+
+    return [{key: value for key, value in flow.items() if key != FIELD} for flow in flows]
+
+
 def send_payload(endpoint: str, token: str, source_name: str, flows: list[dict[str, Any]]) -> dict[str, Any]:
     payload: dict[str, Any] = {"source": source_name, "flows": flows}
     if any("features_v2" in flow for flow in flows):
@@ -458,6 +468,10 @@ def deliver(endpoint: str, token: str, source: str, flows: list[dict], state_fil
     except error.HTTPError as exc:
         if exc.code not in (409, 413, 422):
             raise
+        if exc.code == 422 and any("ssh_auth_success" in flow for flow in flows):
+            # A server older than the SSH login flag rejects it; the flows matter more than the flag.
+            print("Ingest rejected ssh_auth_success; resending this batch without it.", file=sys.stderr, flush=True)
+            return deliver(endpoint, token, source, without_ssh_auth(flows), state_file)
         if exc.code == 422 and any("features_v2" in flow for flow in flows):
             # A server without shadow support rejects the extra fields; never lose v1 flows for them.
             print("Ingest rejected features_v2; resending this batch without them.", file=sys.stderr, flush=True)
@@ -490,11 +504,13 @@ def export_log_once(*, log_path: Path, endpoint: str, state_file: Path,
                     source_name: str, token: str, batch_size: int,
                     features_v2: FeatureV2Stream | None = None,
                     convert: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
-                    send: Callable[[str, str, str, list[dict], Path], int] | None = None) -> int:
+                    send: Callable[[str, str, str, list[dict], Path], int] | None = None,
+                    annotate: Callable[[dict[str, Any], dict[str, Any]], None] | None = None) -> int:
     """Export new complete records from a Zeek JSON log, with a durable checkpoint and pending batch.
 
     By default records are conn.log flows. `convert` (record -> item, or None to skip) and `send`
-    (deliver-shaped) let another log reuse the same rotation, checkpoint and spool handling.
+    (deliver-shaped) let another log reuse the same rotation, checkpoint and spool handling. `annotate`
+    (record, flow) may add fields to each conn.log flow, such as the SSH login flag.
     """
     send = send or deliver
     if not 1 <= batch_size <= MAX_BATCH_SIZE:
@@ -586,6 +602,8 @@ def export_log_once(*, log_path: Path, endpoint: str, state_file: Path,
                     if v2 is not None:
                         flow.update(features_v2=v2["features"], window_warm=v2["window_warm"],
                                     window_degraded=v2["window_degraded"])
+                    if annotate is not None:
+                        annotate(parsed, flow)
                     flows.append(flow)
             except (ValueError, OverflowError, OSError) as exc:
                 quarantine(state_file, str(exc), line)
@@ -620,11 +638,30 @@ def main() -> int:
         probes = dict(log_path=Path(args.http_log_path), endpoint=probe_endpoint,
                       state_file=Path(args.state_file + ".http"), source_name=source_name, token=args.token,
                       batch_size=args.batch_size, convert=probe_event, send=deliver_probes)
+    ssh = ssh_index = None
+    if args.ssh_log_path:
+        from sensor.ssh_auth import SshAuthIndex, successful_login_uid
+
+        ssh_index = SshAuthIndex()
+        # The index lives in memory, so every start rebuilds it from the current ssh.log rather than resuming.
+        ssh_state = Path(args.state_file + ".ssh")
+        for stale in (ssh_state, ssh_state.with_suffix(ssh_state.suffix + ".pending.json")):
+            stale.unlink(missing_ok=True)
+        ssh = dict(log_path=Path(args.ssh_log_path), endpoint="ssh-auth-index", state_file=ssh_state,
+                   source_name=source_name, token="", batch_size=args.batch_size, convert=successful_login_uid,
+                   send=ssh_index.deliver)
     while True:
+        if ssh is not None:
+            try:
+                export_log_once(**ssh)  # Before conn.log, so a login's result is indexed before its flow is read.
+            except (OSError, ValueError) as exc:
+                print(f"SSH login index update failed; flows are sent without the flag: {exc}",
+                      file=sys.stderr, flush=True)
         try:
             exported = export_log_once(
                 log_path=Path(args.log_path), endpoint=args.endpoint, state_file=Path(args.state_file),
                 source_name=source_name, token=args.token, batch_size=args.batch_size, features_v2=stream,
+                annotate=ssh_index.annotate if ssh_index is not None else None,
             )
             failures = 0
             if exported:

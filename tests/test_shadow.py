@@ -294,6 +294,49 @@ class OperationalV2ApiTests(unittest.TestCase):
             response = self.post([{**lone, "flow_id": "lone2"}], keras_label="BENIGN")
         self.assertEqual(response.json()["labels"]["BOTNET"], 1)
 
+    def test_lone_refused_attempt_alerts_are_relabeled_benign_and_recorded(self):
+        rej = {**CONN, "conn_state": "REJ", "history": "Sr", "orig_pkts": 1, "orig_ip_bytes": 60, "resp_pkts": 1,
+               "resp_ip_bytes": 40, "orig_bytes": 0, "resp_bytes": 0, "duration": 0.001}
+        refused = {**v2_flow("refused"), "features_v2": Extractor().process(rej)["features"]}
+        predictions = [ShadowPrediction("refused", "OTHER_ATTACK", 0.61, "classified", None),
+                       ShadowPrediction("answered", "OTHER_ATTACK", 0.9, "classified", None)]
+        with patch.object(self.tree, "classify", return_value=predictions), \
+                self.assertLogs("app.main", "WARNING") as logs:
+            response = self.post([refused, v2_flow("answered")], keras_label="BENIGN")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual((response.json()["labels"]["BENIGN"], response.json()["labels"]["OTHER_ATTACK"]), (1, 1))
+        self.assertIn("Suppressed OTHER_ATTACK (0.610) on lone refused attempt refused", logs.output[0])
+        tree_id = self.tree.model_id
+        self.assertEqual(self.model_ids(), {"refused": f"{tree_id}+refused-attempt-rule", "answered": tree_id})
+        # Disabled, the model's label stands.
+        with patch.object(main, "settings", replace(main.settings, suppress_refused_attempts="false")), \
+                patch.object(self.tree, "classify",
+                             return_value=[ShadowPrediction("refused2", "OTHER_ATTACK", 0.61, "classified", None)]):
+            response = self.post([{**refused, "flow_id": "refused2"}], keras_label="BENIGN")
+        self.assertEqual(response.json()["labels"]["OTHER_ATTACK"], 1)
+
+    def test_successful_ssh_login_alerts_are_relabeled_benign_and_recorded(self):
+        predictions = [ShadowPrediction("login", "BRUTE_FORCE", 0.99, "classified", None),
+                       ShadowPrediction("guess", "BRUTE_FORCE", 0.95, "classified", None),
+                       ShadowPrediction("unknown", "BRUTE_FORCE", 0.95, "classified", None)]
+        flows = [{**v2_flow("login"), "ssh_auth_success": True}, {**v2_flow("guess"), "ssh_auth_success": False},
+                 v2_flow("unknown")]
+        with patch.object(self.tree, "classify", return_value=predictions), \
+                self.assertLogs("app.main", "WARNING") as logs:
+            response = self.post(flows, keras_label="BENIGN")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual((response.json()["labels"]["BENIGN"], response.json()["labels"]["BRUTE_FORCE"]), (1, 2))
+        self.assertIn("Suppressed BRUTE_FORCE (0.990) on successful SSH login login", logs.output[0])
+        tree_id = self.tree.model_id
+        self.assertEqual(self.model_ids(), {"login": f"{tree_id}+ssh-auth-rule", "guess": tree_id,
+                                            "unknown": tree_id})
+        # Disabled, the model's label stands.
+        with patch.object(main, "settings", replace(main.settings, suppress_authenticated_ssh="false")), \
+                patch.object(self.tree, "classify",
+                             return_value=[ShadowPrediction("login2", "BRUTE_FORCE", 0.99, "classified", None)]):
+            response = self.post([{**flows[0], "flow_id": "login2"}], keras_label="BENIGN")
+        self.assertEqual(response.json()["labels"]["BRUTE_FORCE"], 1)
+
     def test_botnet_predictions_are_unvalidated_and_lone_syns_still_benign(self):
         syn = {**CONN, "conn_state": "S0", "history": "S", "orig_pkts": 1, "orig_ip_bytes": 60, "resp_pkts": 0,
                "resp_ip_bytes": 0, "orig_bytes": 0, "resp_bytes": 0, "duration": None}

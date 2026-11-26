@@ -17,6 +17,8 @@ class FlowRecord(BaseModel):
     features_v2: dict[str, float] | None = Field(default=None, min_length=2, max_length=80)
     window_warm: bool | None = None
     window_degraded: bool | None = None
+    # Sent only for connections whose SSH login Zeek saw succeed (sensor/ssh_auth.py).
+    ssh_auth_success: bool | None = None
 
     _validate_time = field_validator("event_time")(validate_event_time)
     _validate_features = field_validator("features", mode="before")(validate_features)

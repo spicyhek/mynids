@@ -18,7 +18,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 
 from app.alert_rules import (BOTNET_REASON, ICMPV6_RULE_ID, LONE_SYN_RULE_ID, NO_V2_FEATURES_REASON,
-                             V2_UNAVAILABLE_REASON, is_lone_unanswered_syn, is_routine_icmpv6)
+                             REFUSED_RULE_ID, SSH_AUTH_RULE_ID, V2_UNAVAILABLE_REASON, is_authenticated_ssh,
+                             is_lone_refused_attempt, is_lone_unanswered_syn, is_routine_icmpv6)
 from app.config import settings
 from app.inference import FlowClassifier
 from app.limits import IngestBodyLimit
@@ -245,14 +246,13 @@ def ingest_flows(payload: FlowBatchRequest, store: StatsStore = Depends(get_stor
     decided = _v2_decisions(payload, flows) if v2_operational() else {}
     suppressed = _apply_alert_rules(payload.source, flows, decided)
     icmpv6_cleared = _validate_routine_icmpv6(flows, decided)
-    _demote_botnet(decided)  # After the lone-SYN rule, which only relabels classified predictions.
+    _demote_botnet(decided)  # After the alert rules, which only relabel classified predictions.
     undecided = _undecided_reasons(flows, decided)
     identified_rows = []
     for row in keras_rows:
         decision = decided.get(row.flow_id)
         if decision is not None:
-            rule = (LONE_SYN_RULE_ID if row.flow_id in suppressed
-                    else ICMPV6_RULE_ID if row.flow_id in icmpv6_cleared else None)
+            rule = suppressed.get(row.flow_id) or (ICMPV6_RULE_ID if row.flow_id in icmpv6_cleared else None)
             identified_rows.append(replace(
                 row, predicted_label=decision.predicted_label, confidence=decision.confidence,
                 model_id=f"{tree.model_id}+{rule}" if rule else tree.model_id,
@@ -334,25 +334,35 @@ def _undecided_reasons(flows: list[dict], decided: dict[str, ShadowPrediction]) 
     return reasons
 
 
-def _apply_alert_rules(source: str, flows: list[dict], decided: dict[str, ShadowPrediction]) -> set[str]:
-    """Relabel v2 alerts on lone unanswered SYNs BENIGN, in place; return the flow IDs changed.
+def _apply_alert_rules(source: str, flows: list[dict], decided: dict[str, ShadowPrediction]) -> dict[str, str]:
+    """Relabel v2 alerts on lone unanswered SYNs, lone refused or aborted attempts and successful SSH logins
+    BENIGN, in place; return the rule ID for each flow changed.
 
     The stored row keeps the model's confidence and records the rule in its model_id, so suppressed flows stay
     countable (shadow summary's operational_label_sources) and the original label is in the log.
     """
-    if settings.suppress_lone_unanswered_syn != "true" or not decided:
-        return set()
-    suppressed = set()
+    rules = [(rule_id, description, matches) for enabled, rule_id, description, matches in (
+        (settings.suppress_lone_unanswered_syn, LONE_SYN_RULE_ID, "lone unanswered SYN",
+         lambda flow: is_lone_unanswered_syn(flow["features_v2"])),
+        (settings.suppress_refused_attempts, REFUSED_RULE_ID, "lone refused attempt",
+         lambda flow: is_lone_refused_attempt(flow["features_v2"])),
+        (settings.suppress_authenticated_ssh, SSH_AUTH_RULE_ID, "successful SSH login", is_authenticated_ssh),
+    ) if enabled == "true"]
+    if not rules or not decided:
+        return {}
+    suppressed = {}
     for flow in flows:
         prediction = decided.get(flow["flow_id"])
-        if (prediction is None or prediction.validation_status != "classified"
-                or prediction.predicted_label == "BENIGN" or not is_lone_unanswered_syn(flow["features_v2"])):
+        if prediction is None or prediction.validation_status != "classified" or prediction.predicted_label == "BENIGN":
             continue
-        decided[flow["flow_id"]] = replace(prediction, predicted_label="BENIGN")
-        suppressed.add(flow["flow_id"])
-        # Warning level: the app configures no logging, so info lines would never reach the pod log.
-        logger.warning("Suppressed %s (%.3f) on lone unanswered SYN %s from %s", prediction.predicted_label,
-                       prediction.confidence, flow["flow_id"], source)
+        for rule_id, description, matches in rules:
+            if matches(flow):
+                decided[flow["flow_id"]] = replace(prediction, predicted_label="BENIGN")
+                suppressed[flow["flow_id"]] = rule_id
+                # Warning level: the app configures no logging, so info lines would never reach the pod log.
+                logger.warning("Suppressed %s (%.3f) on %s %s from %s", prediction.predicted_label,
+                               prediction.confidence, description, flow["flow_id"], source)
+                break
     return suppressed
 
 
