@@ -1,4 +1,4 @@
-"""Shadow evaluation: optional v2 inputs, pinned model loading, isolated storage, exporter safety."""
+"""The v2 model in the app: optional v2 inputs, pinned model loading, labels and rules, exporter safety."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import PropertyMock, patch
+from unittest.mock import patch
 from urllib import error
 
 import joblib
@@ -16,16 +16,13 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app import main
-from app.config import Settings
-from app.inference import FlowClassifier, ModelArtifacts
 from app.schemas import FlowBatchRequest
 from app.shadow import CONTRACT_ID, MODEL_FILE, ShadowClassifier, ShadowPrediction
-from app.storage import PredictionRow, utcnow
+from app.storage import utcnow
 from sensor.zeek_features_v2 import FEATURE_ORDER, Extractor
 from sensor.zeek_to_cicids import FeatureV2Stream, conn_record_to_flow, export_log_once
 
 LABELS = ["BENIGN", "BOTNET", "BRUTE_FORCE", "DOS_DDOS", "OTHER_ATTACK"]
-V1_LABELS = ["BENIGN", "BOTNET", "DOS_DDOS", "OTHER_ATTACK"]
 CONN = {"ts": 1710200000.25, "uid": "Cshadow", "id.orig_h": "10.0.0.15", "id.orig_p": 52344,
         "id.resp_h": "10.0.0.25", "id.resp_p": 443, "proto": "tcp", "duration": 1.5, "orig_bytes": 4096,
         "resp_bytes": 2048, "conn_state": "SF", "missed_bytes": 0, "history": "ShADadFf", "orig_pkts": 12,
@@ -52,8 +49,9 @@ def write_bundle(directory: Path) -> str:
 def v2_flow(flow_id: str, *, port: int = 443, warm: bool = True, degraded: bool = False, protocol: int = 6) -> dict:
     features = Extractor().process({**CONN, "id.resp_p": port})["features"]
     features["protocol"] = float(protocol)
-    return {"flow_id": flow_id, "event_time": utcnow().isoformat(),
-            "features": {"tot_fwd_pkts": 2, "tot_bwd_pkts": 2, "protocol": protocol},
+    v1 = conn_record_to_flow({**CONN, "id.resp_p": port})["features"]
+    v1["protocol"] = float(protocol)
+    return {"flow_id": flow_id, "event_time": utcnow().isoformat(), "features": v1,
             "features_v2": features, "window_warm": warm, "window_degraded": degraded}
 
 
@@ -115,79 +113,8 @@ class ShadowClassifierTests(unittest.TestCase):
             classifier.classify(CONTRACT_ID, [missing])
 
 
-class ShadowApiTests(unittest.TestCase):
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        sha = write_bundle(root / "candidate")
-        self.shadow = ShadowClassifier(root / "candidate", sha)
-        self.shadow.load()
-        settings = replace(main.settings, db_path=root / "nids.sqlite3", ingest_token="test-token")
-        self.enterContext(patch.object(main, "settings", settings))
-        self.enterContext(patch.object(main, "tree", self.shadow))
-        self.enterContext(patch.object(main.classifier, "load", return_value=ModelArtifacts(V1_LABELS, [])))
-        self.client = self.enterContext(TestClient(main.app))
-        self.headers = {"X-Ingest-Token": "test-token"}
-
-    def post(self, flows, labels, contract=CONTRACT_ID):
-        rows = [PredictionRow(utcnow(), label, 0.9) for label in labels]
-        payload = {"source": "zeek", "flows": flows}
-        if contract:
-            payload["features_v2_contract"] = contract
-        with patch.object(main.classifier, "classify_batch", return_value=rows):
-            return self.client.post("/api/internal/flows", json=payload, headers=self.headers)
-
-    def test_shadow_rows_are_separate_from_operational_output(self):
-        flows = [v2_flow("a"), v2_flow("b", port=80), v2_flow("c", warm=False)]
-        first = self.post(flows, ["DOS_DDOS", "DOS_DDOS", "BENIGN"])
-        self.assertEqual(first.status_code, 200, first.text)
-        self.assertEqual(first.json()["labels"]["DOS_DDOS"], 2)
-        self.assertEqual(first.json()["labels"]["BENIGN"], 1)
-        self.assertEqual(self.post(flows, ["DOS_DDOS", "DOS_DDOS", "BENIGN"]).json()["duplicates"], 3)
-        public = self.client.get("/api/public/summary").json()
-        self.assertEqual(public["total_events"], 3)
-        self.assertNotIn("shadow", json.dumps(public).lower())
-        self.assertEqual(self.client.get("/api/internal/shadow/summary").status_code, 403)
-        summary = self.client.get("/api/internal/shadow/summary", headers=self.headers).json()
-        model = summary["models"][self.shadow.model_id]
-        self.assertTrue(summary["shadow_available"])
-        self.assertEqual(model["flows"], 3)  # The replay added nothing.
-        self.assertEqual(model["classified"], 2)
-        self.assertEqual(model["unvalidated_reasons"], {"window_not_warm": 1})
-        self.assertEqual(model["agreement"], {"DOS_DDOS": {"BENIGN": 1, "DOS_DDOS": 1}})
-        self.assertEqual((model["production_alerts"], model["shadow_alerts"]), (2, 1))
-        self.assertEqual(summary["operational_model"], "keras")
-        self.assertEqual(summary["operational_label_sources"], {"cicids2018_dense_model": 3})
-        self.assertEqual(public["model_name"], "cicids2018_dense_model")
-
-    def test_v2_payload_does_not_change_v1_identity(self):
-        flow = v2_flow("same")
-        self.assertEqual(self.post([flow], ["BENIGN"]).status_code, 200)
-        v1_only = {k: flow[k] for k in ("flow_id", "event_time", "features")}
-        replay = self.post([v1_only], ["BENIGN"], contract=None)
-        self.assertEqual(replay.status_code, 200, replay.text)
-        self.assertEqual(replay.json()["duplicates"], 1)
-
-    def test_shadow_failure_never_fails_ingestion(self):
-        response = self.post([v2_flow("x")], ["BENIGN"], contract="zeek-conn-v9")
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["stored"], 1)
-        with patch.object(self.shadow, "classify", side_effect=RuntimeError("model crashed")):
-            self.assertEqual(self.post([v2_flow("y")], ["BENIGN"]).status_code, 200)
-        summary = self.client.get("/api/internal/shadow/summary", headers=self.headers).json()
-        self.assertEqual(summary["models"], {})
-
-    def test_unavailable_shadow_is_a_warning_not_degraded_health(self):
-        with patch.object(self.shadow, "_model", None):
-            health = self.client.get("/healthz").json()
-        self.assertTrue(any("Shadow model" in warning for warning in health["warnings"]))
-        self.assertNotIn("Shadow", json.dumps(self.client.get("/api/public/summary").json()))
-
-
 class OperationalV2ApiTests(unittest.TestCase):
-    """NIDS_OPERATIONAL_MODEL=v2: v2 labels the flows it can judge, Keras labels the rest and runs in shadow."""
-    KERAS_ID = "cicids2018_dense_model:0123456789ab"
+    """v2 labels the flows it can judge; the rest are stored unvalidated with the reason."""
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -196,21 +123,18 @@ class OperationalV2ApiTests(unittest.TestCase):
         sha = write_bundle(root / "candidate")
         self.tree = ShadowClassifier(root / "candidate", sha)
         settings = replace(main.settings, db_path=root / "nids.sqlite3", ingest_token="test-token",
-                           operational_model="v2", v2_model_dir=root / "candidate", v2_model_sha256=sha)
+                           v2_model_dir=root / "candidate", v2_model_sha256=sha)
         self.enterContext(patch.object(main, "settings", settings))
         self.enterContext(patch.object(main, "tree", self.tree))
         self.enterContext(patch.object(main, "tree_runtime_error", None))
-        self.enterContext(patch.object(main.classifier, "load", return_value=ModelArtifacts(V1_LABELS, [])))
-        self.enterContext(patch.object(main.classifier, "model_id", self.KERAS_ID))
-        self.enterContext(patch.object(FlowClassifier, "loaded", new_callable=PropertyMock, return_value=True))
         self.client = self.enterContext(TestClient(main.app))
         self.headers = {"X-Ingest-Token": "test-token"}
 
-    def post(self, flows, keras_label="OTHER_ATTACK", contract=CONTRACT_ID):
-        rows = [PredictionRow(utcnow(), keras_label, 0.9) for _ in flows]
-        payload = {"source": "zeek", "features_v2_contract": contract, "flows": flows}
-        with patch.object(main.classifier, "classify_batch", return_value=rows):
-            return self.client.post("/api/internal/flows", json=payload, headers=self.headers)
+    def post(self, flows, contract=CONTRACT_ID):
+        payload = {"source": "zeek", "flows": flows}
+        if contract:
+            payload["features_v2_contract"] = contract
+        return self.client.post("/api/internal/flows", json=payload, headers=self.headers)
 
     def model_ids(self):
         events = self.client.get("/api/internal/events", headers=self.headers).json()
@@ -221,49 +145,44 @@ class OperationalV2ApiTests(unittest.TestCase):
         return [v2_flow("ok"), v2_flow("dos", port=80), v2_flow("cold", warm=False),
                 v2_flow("lossy", warm=False, degraded=True), v2_flow("icmp6", protocol=58), v1_only]
 
-    def test_undecided_flows_keep_keras_labels_when_configured(self):
-        with patch.object(main, "settings", replace(main.settings, v2_undecided="keras")):
-            response = self.post(self.judged_and_undecided_flows())
-        self.assertEqual(response.json()["labels"], {"BENIGN": 1, "BOTNET": 0, "BRUTE_FORCE": 0, "DOS_DDOS": 1,
-                                                     "OTHER_ATTACK": 3, "UNVALIDATED": 1})
-
     def test_v2_labels_judged_flows_and_undecided_flows_are_unvalidated(self):
         flows = self.judged_and_undecided_flows()
         response = self.post(flows)
         self.assertEqual(response.status_code, 200, response.text)
-        # Keras's OTHER_ATTACK on the cold, degraded and v1-only flows no longer counts as an attack.
         self.assertEqual(response.json()["labels"], {"BENIGN": 1, "BOTNET": 0, "BRUTE_FORCE": 0, "DOS_DDOS": 1,
                                                      "OTHER_ATTACK": 0, "UNVALIDATED": 4})
         events = {e["flow_id"]: e for e in self.client.get("/api/internal/events", headers=self.headers).json()}
         self.assertEqual({fid: events[fid]["validation_reason"] for fid in ("cold", "lossy", "v1-only", "icmp6")},
                          {"cold": "window_not_warm", "lossy": "window_degraded", "v1-only": "no_v2_features",
                           "icmp6": "icmpv6_detection_not_validated"})
-        self.assertEqual(events["cold"]["predicted_label"], "OTHER_ATTACK")  # Keras's label kept for reference.
+        self.assertEqual((events["cold"]["predicted_label"], events["cold"]["confidence"]), ("UNVALIDATED", 0.0))
         tree_id = self.tree.model_id
         self.assertEqual(self.model_ids(), {"ok": tree_id, "dos": tree_id, "icmp6": tree_id,
-                                            "cold": self.KERAS_ID, "lossy": self.KERAS_ID,
-                                            "v1-only": self.KERAS_ID})
+                                            "cold": None, "lossy": None, "v1-only": None})
+        self.assertEqual(self.client.get("/api/internal/shadow/summary").status_code, 403)
         summary = self.client.get("/api/internal/shadow/summary", headers=self.headers).json()
-        self.assertEqual((summary["operational_model"], summary["configured_model_id"]), ("v2", self.KERAS_ID))
-        self.assertTrue(summary["shadow_available"])
-        self.assertEqual(summary["operational_label_sources"], {tree_id: 3, self.KERAS_ID: 3})
-        # Keras is recorded in shadow only for the flows v2 labeled.
-        self.assertEqual(list(summary["models"]), [self.KERAS_ID])
-        keras = summary["models"][self.KERAS_ID]
-        self.assertEqual((keras["flows"], keras["classified"]), (3, 2))
-        self.assertEqual(keras["unvalidated_reasons"], {"icmpv6_detection_not_validated": 1})
-        self.assertEqual(keras["agreement"], {"BENIGN": {"OTHER_ATTACK": 1}, "DOS_DDOS": {"OTHER_ATTACK": 1}})
+        self.assertEqual(summary["operational_model_id"], tree_id)
+        self.assertEqual(summary["operational_label_sources"], {tree_id: 3, "unlabeled": 3})
+        self.assertEqual(summary["models"], {})  # Nothing runs in shadow any more.
         public = self.client.get("/api/public/summary").json()
         self.assertEqual(public["model_name"], "candidate")
         self.assertNotIn("shadow", json.dumps(public).lower())
         self.assertEqual(self.client.get("/healthz").json()["status"], "ok")
-        # A replay is a duplicate whichever model labeled it.
+        # A replay is a duplicate whether or not the model labeled it.
         self.assertEqual(self.post(flows).json()["duplicates"], 6)
+
+    def test_v2_payload_does_not_change_v1_identity(self):
+        flow = v2_flow("same")
+        self.assertEqual(self.post([flow]).status_code, 200)
+        v1_only = {k: flow[k] for k in ("flow_id", "event_time", "features")}
+        replay = self.post([v1_only], contract=None)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["duplicates"], 1)
 
     def test_v2_only_labels_are_stored_and_summarized(self):
         prediction = ShadowPrediction("bf", "BRUTE_FORCE", 0.8, "classified", None)
         with patch.object(self.tree, "classify", return_value=[prediction]):
-            response = self.post([v2_flow("bf")], keras_label="BENIGN")
+            response = self.post([v2_flow("bf")])
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["labels"]["BRUTE_FORCE"], 1)
         self.assertEqual(self.client.get("/api/public/summary").json()["recent_counts"]["BRUTE_FORCE"], 1)
@@ -279,7 +198,7 @@ class OperationalV2ApiTests(unittest.TestCase):
         self.enterContext(patch.object(main, "settings", replace(main.settings, botnet_alerts="alert")))
         with patch.object(self.tree, "classify", return_value=predictions), \
                 self.assertLogs("app.main", "WARNING") as logs:
-            response = self.post([lone, answered], keras_label="BENIGN")
+            response = self.post([lone, answered])
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual((response.json()["labels"]["BENIGN"], response.json()["labels"]["BOTNET"]), (1, 1))
         self.assertIn("Suppressed BOTNET (1.000) on lone unanswered SYN lone", logs.output[0])
@@ -291,7 +210,7 @@ class OperationalV2ApiTests(unittest.TestCase):
         with patch.object(main, "settings", replace(main.settings, suppress_lone_unanswered_syn="false")), \
                 patch.object(self.tree, "classify",
                              return_value=[ShadowPrediction("lone2", "BOTNET", 1.0, "classified", None)]):
-            response = self.post([{**lone, "flow_id": "lone2"}], keras_label="BENIGN")
+            response = self.post([{**lone, "flow_id": "lone2"}])
         self.assertEqual(response.json()["labels"]["BOTNET"], 1)
 
     def test_lone_refused_attempt_alerts_are_relabeled_benign_and_recorded(self):
@@ -302,7 +221,7 @@ class OperationalV2ApiTests(unittest.TestCase):
                        ShadowPrediction("answered", "OTHER_ATTACK", 0.9, "classified", None)]
         with patch.object(self.tree, "classify", return_value=predictions), \
                 self.assertLogs("app.main", "WARNING") as logs:
-            response = self.post([refused, v2_flow("answered")], keras_label="BENIGN")
+            response = self.post([refused, v2_flow("answered")])
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual((response.json()["labels"]["BENIGN"], response.json()["labels"]["OTHER_ATTACK"]), (1, 1))
         self.assertIn("Suppressed OTHER_ATTACK (0.610) on lone refused attempt refused", logs.output[0])
@@ -312,7 +231,7 @@ class OperationalV2ApiTests(unittest.TestCase):
         with patch.object(main, "settings", replace(main.settings, suppress_refused_attempts="false")), \
                 patch.object(self.tree, "classify",
                              return_value=[ShadowPrediction("refused2", "OTHER_ATTACK", 0.61, "classified", None)]):
-            response = self.post([{**refused, "flow_id": "refused2"}], keras_label="BENIGN")
+            response = self.post([{**refused, "flow_id": "refused2"}])
         self.assertEqual(response.json()["labels"]["OTHER_ATTACK"], 1)
 
     def test_successful_ssh_login_alerts_are_relabeled_benign_and_recorded(self):
@@ -323,7 +242,7 @@ class OperationalV2ApiTests(unittest.TestCase):
                  v2_flow("unknown")]
         with patch.object(self.tree, "classify", return_value=predictions), \
                 self.assertLogs("app.main", "WARNING") as logs:
-            response = self.post(flows, keras_label="BENIGN")
+            response = self.post(flows)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual((response.json()["labels"]["BENIGN"], response.json()["labels"]["BRUTE_FORCE"]), (1, 2))
         self.assertIn("Suppressed BRUTE_FORCE (0.990) on successful SSH login login", logs.output[0])
@@ -334,7 +253,7 @@ class OperationalV2ApiTests(unittest.TestCase):
         with patch.object(main, "settings", replace(main.settings, suppress_authenticated_ssh="false")), \
                 patch.object(self.tree, "classify",
                              return_value=[ShadowPrediction("login2", "BRUTE_FORCE", 0.99, "classified", None)]):
-            response = self.post([{**flows[0], "flow_id": "login2"}], keras_label="BENIGN")
+            response = self.post([{**flows[0], "flow_id": "login2"}])
         self.assertEqual(response.json()["labels"]["BRUTE_FORCE"], 1)
 
     def test_botnet_predictions_are_unvalidated_and_lone_syns_still_benign(self):
@@ -345,7 +264,7 @@ class OperationalV2ApiTests(unittest.TestCase):
                        ShadowPrediction("poll", "BOTNET", 0.97, "classified", None),
                        ShadowPrediction("bf", "BRUTE_FORCE", 0.9, "classified", None)]
         with patch.object(self.tree, "classify", return_value=predictions), self.assertLogs("app.main", "WARNING"):
-            response = self.post([lone, v2_flow("poll"), v2_flow("bf")], keras_label="BENIGN")
+            response = self.post([lone, v2_flow("poll"), v2_flow("bf")])
         self.assertEqual(response.status_code, 200, response.text)
         labels = response.json()["labels"]
         self.assertEqual((labels["BENIGN"], labels["BOTNET"], labels["BRUTE_FORCE"], labels["UNVALIDATED"]),
@@ -360,7 +279,7 @@ class OperationalV2ApiTests(unittest.TestCase):
         with patch.object(main, "settings", replace(main.settings, botnet_alerts="alert")), \
                 patch.object(self.tree, "classify",
                              return_value=[ShadowPrediction("poll2", "BOTNET", 0.97, "classified", None)]):
-            self.assertEqual(self.post([v2_flow("poll2")], keras_label="BENIGN").json()["labels"]["BOTNET"], 1)
+            self.assertEqual(self.post([v2_flow("poll2")]).json()["labels"]["BOTNET"], 1)
 
     def test_routine_icmpv6_is_benign_by_rule_and_the_rest_stays_unvalidated(self):
         ns = {"ts": 1794894552.5, "uid": "Cns", "id.orig_h": "2600:1700:38c0:a2e0::1", "id.orig_p": 135,
@@ -382,7 +301,7 @@ class OperationalV2ApiTests(unittest.TestCase):
         predictions = [icmpv6("ns"), icmpv6("ra"), icmpv6("odd", "DOS_DDOS"),
                        ShadowPrediction("ok", "BENIGN", 0.9, "classified", None)]
         with patch.object(self.tree, "classify", return_value=predictions):
-            response = self.post(flows, keras_label="BENIGN")
+            response = self.post(flows)
         self.assertEqual(response.status_code, 200, response.text)
         labels = response.json()["labels"]
         self.assertEqual((labels["BENIGN"], labels["DOS_DDOS"], labels["UNVALIDATED"]), (2, 0, 2))
@@ -405,7 +324,7 @@ class OperationalV2ApiTests(unittest.TestCase):
         self.assertEqual(public["history_unvalidated_reasons"], {"icmpv6_detection_not_validated": 2})
         # Disabled, every ICMPv6 flow stays unvalidated.
         with patch.object(main, "settings", replace(main.settings, validate_routine_icmpv6="false")),                 patch.object(self.tree, "classify", return_value=[icmpv6("ns2")]):
-            response = self.post([flow("ns2", uid="Cns2")], keras_label="BENIGN")
+            response = self.post([flow("ns2", uid="Cns2")])
         self.assertEqual(response.json()["labels"]["UNVALIDATED"], 1)
 
     def test_v2_failure_stores_unvalidated_and_degrades_health_but_not_readiness(self):
@@ -413,7 +332,7 @@ class OperationalV2ApiTests(unittest.TestCase):
             response = self.post([v2_flow("a"), v2_flow("b", port=80)])
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual((response.json()["labels"]["OTHER_ATTACK"], response.json()["labels"]["UNVALIDATED"]), (0, 2))
-        self.assertEqual(set(self.model_ids().values()), {self.KERAS_ID})
+        self.assertEqual(set(self.model_ids().values()), {None})
         health = self.client.get("/healthz").json()
         self.assertEqual(health["status"], "degraded")
         self.assertTrue(any("stored as unvalidated" in warning for warning in health["warnings"]))
@@ -426,25 +345,18 @@ class OperationalV2ApiTests(unittest.TestCase):
         self.assertEqual(self.post([v2_flow("c")]).json()["labels"]["BENIGN"], 1)
         self.assertEqual(self.client.get("/healthz").json()["status"], "ok")
 
-    def test_wrong_contract_falls_back_to_keras(self):
-        response = self.post([v2_flow("x")], keras_label="BENIGN", contract="zeek-conn-v9")
+    def test_wrong_contract_is_stored_unvalidated(self):
+        response = self.post([v2_flow("x")], contract="zeek-conn-v9")
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(self.model_ids(), {"x": self.KERAS_ID})
+        self.assertEqual(response.json()["labels"]["UNVALIDATED"], 1)
+        self.assertEqual(self.model_ids(), {"x": None})
         self.assertEqual(self.client.get("/healthz").json()["status"], "degraded")
 
-    def test_unloadable_v2_bundle_keeps_ingesting_with_keras(self):
+    def test_unloadable_v2_bundle_keeps_ingesting_as_unvalidated(self):
         with patch.object(self.tree, "_model", None), patch.object(self.tree, "_expected_sha256", "0" * 64):
             self.assertEqual(self.client.get("/healthz").json()["status"], "degraded")
-            self.assertEqual(self.post([v2_flow("a")]).status_code, 200)
-        self.assertEqual(self.model_ids(), {"a": self.KERAS_ID})
-
-
-class OperationalModelSettingsTests(unittest.TestCase):
-    def test_mode_must_be_known_and_v2_needs_a_bundle(self):
-        with self.assertRaisesRegex(ValueError, "must be 'keras' or 'v2'"):
-            replace(Settings(), operational_model="tree")
-        with self.assertRaisesRegex(ValueError, "requires NIDS_V2_MODEL_DIR"):
-            replace(Settings(), operational_model="v2", v2_model_dir=None)
+            self.assertEqual(self.post([v2_flow("a")]).json()["labels"]["UNVALIDATED"], 1)
+        self.assertEqual(self.model_ids(), {"a": None})
 
 
 class ExporterShadowTests(unittest.TestCase):

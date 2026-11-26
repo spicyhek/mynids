@@ -202,26 +202,30 @@ Implemented locally; nothing is deployed.
   v1-only; decoded ones are not sent (see Tunnels). If the
   server rejects the v2 fields with 422, the batch is resent without them, so
   v1 flows are never quarantined because of shadow data.
-- The dashboard and public summary always carry `BRUTE_FORCE` (zero until a v2
-  label uses it), so their contract is the same in either operational mode.
-- **Operational v2** (`NIDS_OPERATIONAL_MODEL=v2`, default `keras`; the bundle is
-  `NIDS_V2_MODEL_DIR` / `NIDS_V2_MODEL_SHA256`, and the `NIDS_SHADOW_MODEL_*` names
-  are still accepted). Per flow:
+- The dashboard and public summary always carry `BRUTE_FORCE`.
+- **v2 is the only model** (since 2.0.0; operational since 2026-11-08). The bundle is
+  `NIDS_V2_MODEL_DIR` / `NIDS_V2_MODEL_SHA256` (the `NIDS_SHADOW_MODEL_*` names are
+  still accepted). Per flow:
   - warm, undegraded window (and ICMPv6, stored as unvalidated either way): the
     v2 label is stored;
   - cold or degraded window, or no `features_v2` (VXLAN carriers, the exporter's
-    422 resend): the Keras label is stored;
-  - v2 unloadable or failing for a batch (including a contract mismatch): the
-    whole batch keeps Keras labels, `/healthz` is `degraded` with a public
-    warning, and `/readyz` stays ready so ingestion continues.
-  Every stored flow records `model_id`, the model whose label it carries
-  (`/api/internal/events`). Keras runs in shadow on the flows v2 labeled, so the
-  shadow summary's agreement matrix becomes v2 (production) versus Keras (shadow).
-  `operational_label_sources` in the shadow summary counts stored flows per model;
-  in v2 mode the Keras share is the fallback rate. The public `model_name` is the
-  v2 bundle directory name, and the first start in a new mode records the change
-  in `counter_provenance`, because lifetime counters span both models.
-- **Lone unanswered SYN rule** (v2 mode only; `NIDS_SUPPRESS_LONE_UNANSWERED_SYN`,
+    422 resend): stored unvalidated with the reason (below);
+  - v2 missing, unloadable or failing for a batch (including a contract
+    mismatch): the whole batch is stored unvalidated (`v2_unavailable`),
+    `/healthz` is `degraded` with a public warning, and `/readyz` stays ready so
+    ingestion continues.
+  Every stored flow records `model_id`, the model (plus any alert rule) whose label
+  it carries, or NULL when no model judged it (`/api/internal/events`).
+  `operational_label_sources` in `/api/internal/shadow/summary` counts stored flows
+  per `model_id` (`unlabeled` for NULL), which shows how often each rule fires.
+  Shadow rows from before 2.0.0 (Keras in shadow) stay in that summary until
+  retention removes them. The public `model_name` is the v2 bundle directory name.
+  - The v1 features are still required on every flow (`app/flow_rows.py`): they
+    define the fingerprint, packet count and protocol, and the ICMPv6 rule reads
+    the message type from them. They no longer feed a model.
+  - `NIDS_OPERATIONAL_MODEL=keras` and `NIDS_V2_UNDECIDED=keras` stop the app at
+    startup; the v2-only values (`v2`, `unvalidated`) are still accepted.
+- **Lone unanswered SYN rule** (`NIDS_SUPPRESS_LONE_UNANSWERED_SYN`,
   default `true`, set `false` to disable). A v2 attack label on a single TCP SYN
   that got no reply (`conn_state` S0, history only `S`), from a source that is not
   scanning or flooding in its window, is stored as BENIGN instead.
@@ -234,7 +238,7 @@ Implemented locally; nothing is deployed.
   - Each relabeled row carries `model_id` `<v2 id>+lone-syn-rule`, so
     `operational_label_sources` counts suppressions. The original label and
     confidence go to the pod log as a `Suppressed …` warning.
-- **Lone refused attempt rule** (v2 mode only; `NIDS_SUPPRESS_REFUSED_ATTEMPTS`,
+- **Lone refused attempt rule** (`NIDS_SUPPRESS_REFUSED_ATTEMPTS`,
   default `true`, set `false` to disable). A v2 attack label on a TCP connection
   with no payload either way and at most 3 packets, refused by the responder
   (`conn_state` REJ, history `Sr`) or reset by the originator right after the
@@ -252,7 +256,7 @@ Implemented locally; nothing is deployed.
     false positives; the web-probe detections are untouched.
   - Thresholds and rationale are in `app/alert_rules.py`. Relabeled rows carry
     `model_id` `<v2 id>+refused-attempt-rule` and log a `Suppressed …` warning.
-- **Successful SSH login rule** (v2 mode only; `NIDS_SUPPRESS_AUTHENTICATED_SSH`,
+- **Successful SSH login rule** (`NIDS_SUPPRESS_AUTHENTICATED_SSH`,
   default `true`). The converter, with `--ssh-log-path` or `NIDS_SSH_LOG_PATH`
   (off when unset), reads Zeek's `ssh.log` into an in-memory index before each
   conn.log pass and sends `ssh_auth_success: true` on flows whose login Zeek
@@ -276,15 +280,15 @@ Implemented locally; nothing is deployed.
     judged as before. An older server answers 422 to the field, and the
     converter resends the batch without it, so the rollout order does not
     matter. The index is rebuilt from the current ssh.log on every start.
-- **Undecided flows are unvalidated** (v2 mode only; `NIDS_V2_UNDECIDED`, default
-  `unvalidated`, or `keras` for the old fallback). A flow v2 does not judge is
-  stored unvalidated with its reason, instead of taking the Keras label:
+- **Undecided flows are unvalidated**. A flow v2 does not judge is stored
+  unvalidated with label `UNVALIDATED`, confidence 0 and its reason:
   `window_not_warm`, `window_degraded`, `no_v2_features`, or `v2_unavailable`
-  (v2 failed or rejected the batch). Keras's label stays in the row for reference.
+  (v2 missing, failing or rejecting the batch). Until 2.0.0 the Keras label was
+  kept in the row for reference.
   - Why: in the 2026-11-10 held-out test, Keras raised 9 of the 46 benign false
     alarms on cold windows. Live, Keras raised about 2,000 false alerts a day.
   - Cost: the first minute after a sensor restart produces no attack labels.
-- **BOTNET is unvalidated** (v2 mode only; `NIDS_BOTNET_ALERTS`, default
+- **BOTNET is unvalidated** (`NIDS_BOTNET_ALERTS`, default
   `unvalidated`, or `alert`). A v2 BOTNET prediction is stored unvalidated with
   reason `botnet_detection_not_validated`, keeping the label and `model_id`. It
   runs after the lone-SYN rule, so lone SYNs still become BENIGN.
@@ -292,7 +296,7 @@ Implemented locally; nothing is deployed.
     0), the homelab has no botnet ground truth, and every BOTNET label so far was
     benign. In the held-out test it flagged 30 regular benign HTTP GETs to :8080,
     which resemble the Ares C2 polls in its training data.
-- **Routine ICMPv6 is validated by rule** (v2 mode only;
+- **Routine ICMPv6 is validated by rule** (
   `NIDS_VALIDATE_ROUTINE_ICMPV6`, default `true`, set `false` to disable). An
   ICMPv6 flow is stored as classified BENIGN, instead of unvalidated
   `icmpv6_detection_not_validated`, when all of these hold:
@@ -394,6 +398,8 @@ Implemented locally; nothing is deployed.
 
 ### Promotion to operational (for the operator, through GitOps)
 
+Done on 2026-11-08 (homelab-infra #55); kept as the record of how it was done.
+
 1. Deploy the image with this code and no variable changes. Behavior is
    unchanged (`keras` is the default). Startup adds the `model_id` column; older
    rows keep it NULL (`unrecorded`). Confirm `/healthz`, ingest and the shadow
@@ -406,8 +412,9 @@ Implemented locally; nothing is deployed.
 4. Watch for several days: the operational alert rate, the Keras share of
    `operational_label_sources` (it should be mostly restarts' cold windows), and
    every flow v2 labels as an attack that Keras labels benign.
-5. Rollback is setting `NIDS_OPERATIONAL_MODEL=keras` (or removing it). Rows keep
-   the `model_id` that labeled them.
+5. Rollback was setting `NIDS_OPERATIONAL_MODEL=keras`. That path ended with
+   2.0.0, which removed the Keras model; rolling back now means deploying an
+   earlier image (1.x) or another v2 bundle.
 
 ## Promotion gates (proposal)
 

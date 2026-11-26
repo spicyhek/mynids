@@ -13,8 +13,6 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app import main
-from app.inference import ModelArtifacts
-from app.storage import PredictionRow
 from sensor.zeek_to_cicids import conn_record_to_flow, export_log_once, load_state
 from test_zeek_to_cicids import SAMPLE_CONN_RECORD, acknowledge
 
@@ -137,10 +135,8 @@ class ExporterRecoveryTests(unittest.TestCase):
 
     def test_lost_response_after_commit_retries_through_real_api_without_double_counting(self):
         settings = replace(main.settings, db_path=self.root / "api.sqlite3", ingest_token="token")
-        labels = ["BENIGN", "BOTNET", "DOS_DDOS", "OTHER_ATTACK"]
-        def classify(flows):
-            return [PredictionRow(flow["event_time"], "BENIGN", 0.9) for flow in flows]
-        with patch.object(main, "settings", settings), patch.object(main.classifier, "load", return_value=ModelArtifacts(labels, [])), patch.object(main.classifier, "classify_batch", side_effect=classify):
+        # No v2 bundle: the flow is stored unvalidated, which is enough to count it once.
+        with patch.object(main, "settings", settings), patch.object(main, "tree", None):
             with TestClient(main.app) as client:
                 lose_ack = True
                 responses = []

@@ -1,8 +1,7 @@
-"""Tree classifier for the zeek-conn-window-v2 contract.
+"""Tree classifier for the zeek-conn-window-v2 contract: the model that labels flows.
 
-It runs either in shadow (predictions stored separately; operational labels, counters and the
-dashboard unchanged) or, with NIDS_OPERATIONAL_MODEL=v2, as the operational model for the flows it
-can judge. The model file is a pickle, so it loads only from an operator-configured directory and
+The name is from its time in shadow, before it replaced the Keras model (operational 2026-11-08, Keras
+removed in 2.0.0). The model file is a pickle, so it loads only from an operator-configured directory and
 only when its SHA-256 matches the pinned value.
 """
 from __future__ import annotations

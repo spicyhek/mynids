@@ -18,9 +18,9 @@ ROOT = Path(__file__).resolve().parent.parent
 SPLITS = ("train", "validation", "test", "regression")
 V1_CONTRACT = "zeek-conn-v1"
 CONTRACT_FILES = ("feature_order.json", "label_map.json", "sensor/zeek_to_cicids.py",
-                  "app/validation.py", "app/schemas.py", "app/inference.py")
+                  "app/validation.py", "app/schemas.py", "app/flow_rows.py")
 V2_CONTRACT_FILES = ("sensor/zeek_features_v2.py", "sensor/zeek_to_cicids.py",
-                     "app/validation.py", "app/schemas.py", "app/inference.py")
+                     "app/validation.py", "app/schemas.py", "app/flow_rows.py")
 
 
 def sha256(path: Path) -> str:
@@ -389,18 +389,3 @@ def load_prepared(directory: Path) -> tuple[list[dict], dict]:
         if [row for _, row in jsonl(directory / f"splits/{split}.jsonl")] != [row for row in records if row["split"] == split]:
             raise ValueError("Split file differs from the canonical dataset.")
     return records, manifest
-
-
-def fit_preprocessing(records: list[dict], schema: dict):
-    """Fit moments on training only; validation, test, and regression cannot influence the scaler."""
-    from sklearn.preprocessing import LabelEncoder, StandardScaler
-
-    require_training_coverage(records, schema["labels"])
-    matrix = model_matrix([record["flow"] for record in records], schema["feature_order"])
-    train = np.asarray([row["split"] == "train" for row in records])
-    scaler = StandardScaler().fit(matrix[train])
-    encoder = LabelEncoder().fit(schema["labels"])
-    if list(encoder.classes_) != schema["labels"]:
-        raise ValueError("Label encoder ordering differs from the production label map.")
-    targets = encoder.transform([row["label"] for row in records])
-    return scaler, encoder, matrix, targets

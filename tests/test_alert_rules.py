@@ -3,7 +3,9 @@ connections that carried data still are."""
 from __future__ import annotations
 
 from dataclasses import replace
+import os
 import unittest
+from unittest.mock import patch
 
 from app.alert_rules import is_lone_refused_attempt, is_lone_unanswered_syn, is_routine_icmpv6
 from app.config import Settings
@@ -59,12 +61,18 @@ class LoneUnansweredSynTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "NIDS_SUPPRESS_LONE_UNANSWERED_SYN"):
             replace(Settings(), suppress_lone_unanswered_syn="yes")
 
-    def test_undecided_and_botnet_settings_are_validated(self):
-        with self.assertRaisesRegex(ValueError, "NIDS_V2_UNDECIDED"):
-            replace(Settings(), v2_undecided="drop")
+    def test_botnet_setting_is_validated_and_removed_keras_modes_are_refused(self):
         with self.assertRaisesRegex(ValueError, "NIDS_BOTNET_ALERTS"):
             replace(Settings(), botnet_alerts="off")
-        self.assertEqual((Settings().v2_undecided, Settings().botnet_alerts), ("unvalidated", "unvalidated"))
+        self.assertEqual(Settings().botnet_alerts, "unvalidated")
+        # The values that described v2-only operation still start; the Keras modes fail loudly.
+        for name, kept, removed in (("NIDS_OPERATIONAL_MODEL", "v2", "keras"),
+                                    ("NIDS_V2_UNDECIDED", "unvalidated", "keras")):
+            with self.subTest(name=name), patch.dict(os.environ, {name: kept}):
+                Settings()
+            with self.subTest(name=name), patch.dict(os.environ, {name: removed}), \
+                    self.assertRaisesRegex(ValueError, f"{name}=keras is no longer supported"):
+                Settings()
 
 
 # Live false positives from 2026-11-25 21:00Z, as the sensor logged them: the control plane's DNS retry over TCP

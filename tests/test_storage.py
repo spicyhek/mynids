@@ -298,7 +298,7 @@ class LifetimeFlowTests(unittest.TestCase):
         ])
         events = {event["flow_id"]: event["model_id"] for event in store.list_events()}
         self.assertEqual(events, {"a": "tree:abc", "b": "keras:def", "c": "keras:def", None: None})
-        self.assertEqual(store.operational_model_counts(1), {"keras:def": 2, "tree:abc": 1, "unrecorded": 1})
+        self.assertEqual(store.operational_model_counts(1), {"keras:def": 2, "tree:abc": 1, "unlabeled": 1})
         self.assertEqual(self.summary(store)["recent_counts"]["BRUTE_FORCE"], 1)
 
     def test_operational_model_change_is_recorded_once_and_reported(self):

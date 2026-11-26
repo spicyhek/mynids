@@ -7,7 +7,7 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from app.inference import FlowClassifier
+from app.flow_rows import check_features
 from app.storage import PredictionRow, StatsStore, utcnow
 from sensor.zeek_to_cicids import conn_record_to_flow, export_log_once
 
@@ -47,25 +47,11 @@ class ZeekToCicidsTests(unittest.TestCase):
         cls.repo_root = Path(__file__).resolve().parent.parent
         cls.feature_order = json.loads((cls.repo_root / "feature_order.json").read_text(encoding="utf-8"))
 
-    def build_validator(self) -> FlowClassifier:
-        validator = FlowClassifier(
-            model_path=Path("unused.keras"),
-            scaler_path=Path("unused.joblib"),
-            feature_order_path=Path("unused.json"),
-            label_map_path=Path("unused.json"),
-            label_encoder_path=Path("unused.joblib"),
-        )
-        validator._feature_order = list(self.feature_order)
-        return validator
-
     def test_conn_record_produces_complete_numeric_schema(self) -> None:
         flow = conn_record_to_flow(SAMPLE_CONN_RECORD)
 
         self.assertEqual(set(flow["features"]), set(self.feature_order))
-        validator = self.build_validator()
-        vector = validator._build_feature_vector(flow["features"])
-
-        self.assertEqual(len(vector), len(self.feature_order))
+        check_features(flow["features"], self.feature_order)
         self.assertEqual(flow["features"]["dst_port"], 443.0)
         self.assertEqual(flow["features"]["src_port"], 52344.0)
         self.assertEqual(flow["features"]["protocol"], 6.0)
@@ -192,8 +178,7 @@ class ZeekToCicidsTests(unittest.TestCase):
 
             flow = captured_payload["flows"][0]
 
-            validator = self.build_validator()
-            validator._build_feature_vector(flow["features"])
+            check_features(flow["features"], self.feature_order)
 
             store = StatsStore(db_path, labels=["BENIGN", "BOTNET", "DOS_DDOS", "OTHER_ATTACK"])
             store.initialize()
